@@ -11,11 +11,10 @@ pub enum FilterError {
 
 #[derive(Debug, Clone)]
 pub enum FilterMode {
-    Include, // Show ONLY lines matching pattern
-    Exclude, // Show everything EXCEPT lines matching pattern
+    Include, 
+    Exclude,
 }
 
-/// Statistics tracker - Thread-safe via Atomics
 #[derive(Debug, Default)]
 pub struct FilterStats {
     pub lines_scanned: AtomicU64,
@@ -31,10 +30,9 @@ pub struct FilterEngine {
 
 impl FilterEngine {
     pub fn new(pattern: &str, case_sensitive: bool, mode: FilterMode) -> Result<Self, FilterError> {
-        // Correctly handle Case Sensitivity using Builder
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(!case_sensitive)
-            .multi_line(false) // Optimize for single line chunks
+            .multi_line(false)
             .build(pattern)
             .map_err(|e| FilterError::InvalidRegex(e.to_string()))?;
 
@@ -45,25 +43,18 @@ impl FilterEngine {
         })
     }
 
-    /// The Hot Path: Check if line matches and update stats
-    /// &self is sufficient because stats are Atomic
     #[inline]
     pub fn should_include(&self, line: &[u8]) -> bool {
-        // 1. Update Scanned Stats
         self.stats.lines_scanned.fetch_add(1, Ordering::Relaxed);
         self.stats.bytes_processed.fetch_add(line.len() as u64, Ordering::Relaxed);
 
-        // 2. Perform Match (simd-accelerated by grep crate)
-        // unwrap_or(false) handles potential internal matcher errors gracefully
         let matches = self.matcher.is_match(line).unwrap_or(false);
 
-        // 3. Apply Mode Logic
         let include = match self.mode {
             FilterMode::Include => matches,
             FilterMode::Exclude => !matches,
         };
 
-        // 4. Update Match Stats
         if include {
             self.stats.lines_matched.fetch_add(1, Ordering::Relaxed);
         }
@@ -126,7 +117,6 @@ mod tests {
 
     #[test]
     fn test_case_insensitive_builder() {
-        // "error" should match "ERROR" even without (?i) in the pattern
         let filter = FilterEngine::new("error", false, FilterMode::Include)
             .expect("Failed to create filter");
 
