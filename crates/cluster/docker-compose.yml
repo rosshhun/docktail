@@ -1,0 +1,113 @@
+services:
+  # Certificate generator - runs once to create certs
+  cert-generator:
+    image: alpine:latest
+    volumes:
+      - ./certs:/certs
+      - ../agent/scripts:/scripts:ro
+    command: sh /scripts/generate-certs.sh
+    profiles:
+      - setup
+
+  # Docktail Cluster API
+  cluster:
+    build:
+      context: ../..
+      dockerfile: crates/cluster/Dockerfile
+    container_name: docktail-cluster
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount certificates for agent communication
+      - ./certs:/etc/docktail/certs:ro
+      # Mount cluster config
+      - ./config/cluster.toml:/etc/docktail/cluster.toml:ro
+    environment:
+      # Cluster configuration
+      - CLUSTER_BIND_ADDRESS=0.0.0.0:8080
+      - CLUSTER_ENABLE_GRAPHIQL=true
+      - RUST_LOG=cluster=info,async_graphql=debug
+      # Agent connections (will be configured dynamically)
+      - CLUSTER_AGENT_1_ID=agent-1
+      - CLUSTER_AGENT_1_NAME=Agent 1
+      - CLUSTER_AGENT_1_ADDRESS=agent1:50051
+      - CLUSTER_AGENT_2_ID=agent-2
+      - CLUSTER_AGENT_2_NAME=Agent 2
+      - CLUSTER_AGENT_2_ADDRESS=agent2:50051
+    depends_on:
+      - agent1
+      - agent2
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Docktail Agent 1
+  agent1:
+    build:
+      context: ../agent
+      dockerfile: Dockerfile
+    container_name: docktail-agent-1
+    ports:
+      - "50051:50051"
+    volumes:
+      # Mount Docker socket to access containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount certificates
+      - ./certs:/etc/docktail/certs:ro
+    environment:
+      - AGENT_BIND_ADDRESS=0.0.0.0:50051
+      - AGENT_TLS_CERT=/etc/docktail/certs/agent.crt
+      - AGENT_TLS_KEY=/etc/docktail/certs/agent.key
+      - AGENT_TLS_CA=/etc/docktail/certs/ca.crt
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_MAX_STREAMS=100
+      - RUST_LOG=agent=info
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Docktail Agent 2 (simulates multi-host setup)
+  agent2:
+    build:
+      context: ../agent
+      dockerfile: Dockerfile
+    container_name: docktail-agent-2
+    ports:
+      - "50052:50051"
+    volumes:
+      # Mount Docker socket to access containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount certificates
+      - ./certs:/etc/docktail/certs:ro
+    environment:
+      - AGENT_BIND_ADDRESS=0.0.0.0:50051
+      - AGENT_TLS_CERT=/etc/docktail/certs/agent.crt
+      - AGENT_TLS_KEY=/etc/docktail/certs/agent.key
+      - AGENT_TLS_CA=/etc/docktail/certs/ca.crt
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_MAX_STREAMS=100
+      - RUST_LOG=agent=info
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Example test containers
+  test-app-1:
+    image: busybox:latest
+    container_name: test-app-1
+    command: sh -c "while true; do echo '[APP-1] Log message at $(date)'; sleep 2; done"
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  test-app-2:
+    image: busybox:latest
+    container_name: test-app-2
+    command: sh -c "while true; do echo '[APP-2] Important event at $(date)'; sleep 3; done"
+    restart: unless-stopped
+    networks:
+      - docktail
+
+networks:
+  docktail:
+    driver: bridge

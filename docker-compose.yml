@@ -1,0 +1,112 @@
+# Docktail Full Stack - Root docker-compose.yml
+# This sets up the complete system: Cluster API + Multiple Agents + Test Containers
+
+services:
+  # Certificate generator - runs once to create certs
+  cert-generator:
+    image: alpine:latest
+    volumes:
+      - ./certs:/certs
+      - ./crates/agent/scripts:/scripts:ro
+    command: sh /scripts/generate-certs.sh
+    profiles:
+      - setup
+
+  # Docktail Cluster API
+  cluster:
+    build:
+      context: .
+      dockerfile: crates/cluster/Dockerfile
+    container_name: docktail-cluster
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./certs:/etc/docktail/certs:ro
+      - ./crates/cluster/config/cluster.toml:/etc/docktail/cluster.toml:ro
+    environment:
+      - RUST_LOG=cluster=info,async_graphql=debug
+    depends_on:
+      - agent1
+      - agent2
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Docktail Agent 1
+  agent1:
+    build:
+      context: ./crates/agent
+      dockerfile: Dockerfile
+    container_name: docktail-agent-1
+    ports:
+      - "50051:50051"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/etc/docktail/certs:ro
+      # Mount agent config (optional - uses env vars as fallback)
+      - ./crates/agent/config/agent.toml:/etc/docktail/agent.toml:ro
+    environment:
+      - AGENT_BIND_ADDRESS=0.0.0.0:50051
+      - AGENT_TLS_CERT=/etc/docktail/certs/agent.crt
+      - AGENT_TLS_KEY=/etc/docktail/certs/agent.key
+      - AGENT_TLS_CA=/etc/docktail/certs/ca.crt
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_MAX_STREAMS=100
+      - RUST_LOG=agent=debug
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Docktail Agent 2
+  agent2:
+    build:
+      context: ./crates/agent
+      dockerfile: Dockerfile
+    container_name: docktail-agent-2
+    ports:
+      - "50052:50051"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/etc/docktail/certs:ro
+      # Mount agent config (optional - uses env vars as fallback)
+      - ./crates/agent/config/agent.toml:/etc/docktail/agent.toml:ro
+    environment:
+      - AGENT_BIND_ADDRESS=0.0.0.0:50051
+      - AGENT_TLS_CERT=/etc/docktail/certs/agent.crt
+      - AGENT_TLS_KEY=/etc/docktail/certs/agent.key
+      - AGENT_TLS_CA=/etc/docktail/certs/ca.crt
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_MAX_STREAMS=100
+      - RUST_LOG=agent=debug
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Test Applications
+  test-app-1:
+    image: busybox:latest
+    container_name: test-app-1
+    command: sh -c 'while true; do echo "[APP-1] Service log at $$(date)"; sleep 2; done'
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  test-app-2:
+    image: busybox:latest
+    container_name: test-app-2
+    command: sh -c 'while true; do echo "[APP-2] Event at $$(date)"; sleep 3; done'
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  test-app-3:
+    image: alpine:latest
+    container_name: test-app-3
+    command: sh -c 'while true; do echo "[APP-3] Status update at $$(date)"; sleep 5; done'
+    restart: unless-stopped
+    networks:
+      - docktail
+
+networks:
+  docktail:
+    driver: bridge

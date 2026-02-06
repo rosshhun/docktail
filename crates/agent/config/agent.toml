@@ -1,0 +1,106 @@
+# Docktail Agent Configuration
+# 
+# Edit this file to customize agent behavior, then mount it in docker-compose.yml
+# or set AGENT_CONFIG_FILE to point to your custom location.
+#
+# PRODUCTION CHECKLIST:
+#   [ ] Use absolute paths for TLS certificates (not relative paths)
+#   [ ] Verify docker_socket path is correct for your environment
+#   [ ] Adjust inventory_sync_interval_secs based on workload (3-5s for production)
+#   [ ] Review multiline settings for your log types
+#   [ ] Set up audit logging if required (uncomment audit_log_path)
+#
+# Configuration Hierarchy (highest priority wins):
+#   1. Base defaults (in code)
+#   2. This config file
+#   3. Environment variables (AGENT_BIND_ADDRESS, DOCKER_SOCKET, etc.)
+#   4. Per-container config file overrides ([multiline.container_overrides])
+#   5. Docker labels on containers (highest priority, runtime override)
+#
+# Environment variables override file settings for critical options:
+#   - AGENT_BIND_ADDRESS
+#   - DOCKER_SOCKET
+#   - AGENT_TLS_CERT, AGENT_TLS_KEY, AGENT_TLS_CA
+#
+# Per-container overrides: Use Docker labels on specific containers:
+#   - docktail.multiline.enabled=false
+#   - docktail.multiline.timeout_ms=500
+#   - docktail.multiline.max_lines=100
+
+# Agent binding and networking
+bind_address = "0.0.0.0:50051"
+
+# TLS/mTLS certificate paths
+# NOTE: For production, use absolute paths (e.g., /etc/docktail/certs/agent.crt)
+# Relative paths are for development convenience and depend on working directory
+tls_cert_path = "certs/agent.crt"
+tls_key_path = "certs/agent.key"
+tls_ca_path = "certs/ca.crt"
+
+# Docker socket path
+# Empty string = auto-detect platform default (/var/run/docker.sock on Linux)
+# For custom socket: "unix:///path/to/docker.sock" or "tcp://host:2375"
+docker_socket = ""
+
+# Maximum concurrent gRPC streams
+max_concurrent_streams = 100
+
+# Background inventory sync interval (seconds)
+# How often to refresh the container cache from Docker
+# Recommendations:
+#   - Production (stable workloads): 3-5 seconds
+#   - CI/CD (high container churn): 1-2 seconds
+#   - Development: 2 seconds (default)
+# Trade-off: Lower = fresher data but more Docker API load
+inventory_sync_interval_secs = 2
+
+# Audit log path (optional)
+# audit_log_path = "/var/log/docktail/audit.log"
+
+# Multiline log grouping configuration
+[multiline]
+# Enable/disable multiline grouping globally
+# Set to false for pure JSON/structured log environments
+enabled = true
+
+# Timeout in milliseconds before flushing a pending group
+# Recommendations:
+#   - Production (high throughput): 200-300ms
+#   - Development (debugging): 500-1000ms
+#   - Testing: 100ms for faster feedback
+timeout_ms = 300
+
+# Maximum number of continuation lines per group
+# Safety limit to prevent unbounded memory usage
+# Typical stack traces: 10-30 lines
+# Deep traces (debugging): 50-100 lines
+max_lines = 50
+
+# Require error-like keywords before grouping indented lines
+# true (recommended) = only group after ERROR/WARN/panic
+#   - Prevents YAML/JSON configuration from being grouped
+#   - Safer, fewer false positives
+# false (aggressive) = group any indented content
+#   - May group YAML dumps and structured output
+#   - Use only if you have pure unstructured logs
+require_error_anchor = true
+
+# Per-container multiline overrides (static configuration)
+# Keys are container names (e.g., "postgres", "redis", "my-app")
+# Docker labels have higher priority than these settings
+#
+# Example: Disable multiline for a JSON-only service
+# [multiline.container_overrides.my-json-api]
+# enabled = false
+#
+# Example: Extend timeout for slow-logging database
+# [multiline.container_overrides.postgres]
+# enabled = true
+# timeout_ms = 1000
+# max_lines = 100
+#
+# Example: Aggressive multiline for debugging a specific service
+# [multiline.container_overrides.problematic-service]
+# enabled = true
+# timeout_ms = 500
+# max_lines = 200

@@ -1,0 +1,768 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+package docktail.agent;
+
+service LogService {
+  // Stream logs from a container with optional filtering and time-travel
+  // Returns NormalizedLogEntry with parsed structured data (BREAKING CHANGE in v0.2.0)
+  rpc StreamLogs(LogStreamRequest) returns (stream NormalizedLogEntry);
+}
+
+message LogStreamRequest {
+  // Container ID (full or short hash)
+  string container_id = 1;
+  
+  // Time-travel: Unix timestamp (seconds) to start streaming from
+  // Only supported with json-file, journald, or local log drivers
+  optional int64 since = 2;
+  
+  // Time-travel: Unix timestamp (seconds) to stop streaming at
+  optional int64 until = 3;
+  
+  // Follow mode (like `tail -f`) - keep streaming new logs
+  bool follow = 4;
+  
+  // Number of lines to show from the end (like `docker logs --tail 100`)
+  optional uint32 tail_lines = 5;
+  
+  // Optional regex pattern for filtering
+  optional string filter_pattern = 6;
+  
+  // Filter mode (include, exclude, or none)
+  FilterMode filter_mode = 7;
+  
+  // Show timestamps in the output
+  bool timestamps = 8;
+  
+  // NEW in v0.2.0: Disable parsing (return raw logs only)
+  bool disable_parsing = 9;
+}
+
+// NEW in v0.2.0: Normalized log entry with parsed structure
+message NormalizedLogEntry {
+  // Original fields (preserved for backward compatibility)
+  string container_id = 1;
+  int64 timestamp_nanos = 2;
+  LogLevel log_level = 3;
+  uint64 sequence = 4;
+  
+  // Raw log content (always preserved)
+  bytes raw_content = 5;
+  
+  // NEW: Parsed structured fields (null if parsing failed or disabled)
+  optional ParsedLog parsed = 6;
+  
+  // NEW: Metadata about parsing operation
+  ParseMetadata metadata = 7;
+  
+  // NEW in Phase 4: Multiline grouping support
+  repeated LogLine grouped_lines = 10;   // Continuation lines (empty if not grouped)
+  uint32 line_count = 11;                // Total lines (1 = single line)
+  bool is_grouped = 12;                  // Quick check for UI
+}
+
+// Individual log line within a multiline group
+message LogLine {
+  bytes content = 1;
+  int64 timestamp_nanos = 2;
+  uint64 sequence = 3;
+}
+
+// Parsed structured log data
+message ParsedLog {
+  // Common structured fields
+  optional string level = 1;        // info, warn, error, debug
+  optional string message = 2;      // Main log message
+  optional string logger = 3;       // Logger name (e.g., "app.users")
+  optional google.protobuf.Timestamp timestamp = 4;     // App-provided timestamp (if different from Docker)
+  
+  // Request context (common in web apps)
+  optional RequestContext request = 5;
+  
+  // Error context (for errors)
+  optional ErrorContext error = 6;
+  
+  // Additional fields (key-value pairs)
+  repeated KeyValuePair fields = 7;
+}
+
+// HTTP request context
+message RequestContext {
+  optional string method = 1;       // GET, POST, etc.
+  optional string path = 2;         // /api/users
+  optional string remote_addr = 3;  // Client IP
+  optional int32 status_code = 4;   // HTTP status
+  optional int64 duration_ms = 5;   // Request duration
+  optional string request_id = 6;   // Correlation ID
+}
+
+// Error context
+message ErrorContext {
+  optional string error_type = 1;   // Exception class
+  optional string error_message = 2;
+  repeated string stack_trace = 3;
+  optional string file = 4;
+  optional int32 line = 5;
+}
+
+// Key-value pair for additional fields
+message KeyValuePair {
+  string key = 1;
+  string value = 2;
+}
+
+// Parse metadata (info about the parsing operation)
+message ParseMetadata {
+  LogFormat detected_format = 1;
+  bool parse_success = 2;
+  optional string parse_error = 3;
+  int64 parse_time_nanos = 4;      // Time taken to parse
+}
+
+// Detected log format
+enum LogFormat {
+  LOG_FORMAT_UNKNOWN = 0;
+  LOG_FORMAT_JSON = 1;
+  LOG_FORMAT_LOGFMT = 2;
+  LOG_FORMAT_PLAIN_TEXT = 3;
+  LOG_FORMAT_SYSLOG = 4;
+  LOG_FORMAT_HTTP_LOG = 5;
+}
+
+// DEPRECATED: Use NormalizedLogEntry instead
+// Kept temporarily for reference, will be removed in v0.3.0
+message LogStreamResponse {
+  // Container ID this log belongs to
+  string container_id = 1;
+  
+  // Unix timestamp in nanoseconds for precision
+  int64 timestamp_nanos = 2;
+  
+  // Stream type (stdout or stderr)
+  LogLevel log_level = 3;
+  
+  // Raw log content (binary-safe, not necessarily UTF-8)
+  bytes content = 4;
+  
+  // Sequence number for gap detection and ordering
+  // Monotonically increasing per stream
+  uint64 sequence = 5;
+}
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  LOG_LEVEL_STDOUT = 1;
+  LOG_LEVEL_STDERR = 2;
+}
+
+enum FilterMode {
+  FILTER_MODE_UNSPECIFIED = 0;
+  FILTER_MODE_NONE = 1;         // No filtering - send all logs
+  FILTER_MODE_INCLUDE = 2;      // Show ONLY lines matching pattern
+  FILTER_MODE_EXCLUDE = 3;      // Show everything EXCEPT lines matching pattern
+}
+
+service InventoryService {
+  // List all containers on the Docker host
+  rpc ListContainers(ContainerListRequest) returns (ContainerListResponse);
+  
+  // Get detailed information about a specific container
+  rpc InspectContainer(ContainerInspectRequest) returns (ContainerInspectResponse);
+}
+
+message ContainerListRequest {
+  // Filter by container state
+  optional ContainerStateFilter state_filter = 1;
+  
+  // Include stopped containers (default: false - only running)
+  bool include_stopped = 2;
+  
+  // Limit the number of results
+  optional uint32 limit = 3;
+}
+
+message ContainerListResponse {
+  repeated ContainerInfo containers = 1;
+  
+  // Total number of containers (before limit applied)
+  uint32 total_count = 2;
+}
+
+message ContainerInspectRequest {
+  // Container ID (full or short hash)
+  string container_id = 1;
+}
+
+message ContainerInspectResponse {
+  ContainerInfo info = 1;
+  ContainerDetails details = 2;
+}
+
+message ContainerInfo {
+  // Container ID (64-char hash)
+  string id = 1;
+  
+  // Container name (without leading /)
+  string name = 2;
+  
+  // Image name with tag
+  string image = 3;
+  
+  // Current state: "running", "paused", "exited", etc.
+  string state = 4;
+  
+  // Human-readable status: "Up 2 hours", "Exited (0) 5 minutes ago"
+  string status = 5;
+  
+  // Log driver: "json-file", "journald", "syslog", etc.
+  optional string log_driver = 6;
+  
+  // Container labels (key-value pairs)
+  map<string, string> labels = 7;
+  
+  // Creation timestamp (Unix seconds)
+  int64 created_at = 8;
+  
+  // Port mappings (structured data)
+  repeated PortMapping ports = 9;
+
+  // Detailed container state information (from inspect)
+  optional ContainerStateInfo state_info = 10;
+}
+
+// Detailed container state information from docker inspect
+message ContainerStateInfo {
+  // Whether the container was killed due to OOM
+  bool oom_killed = 1;
+
+  // Host PID of the container's main process (0 if not running)
+  int64 pid = 2;
+
+  // Exit code of the last run
+  int32 exit_code = 3;
+
+  // When the container last started (RFC3339)
+  string started_at = 4;
+
+  // When the container last finished (RFC3339)
+  string finished_at = 5;
+
+  // Number of times the container has been restarted
+  int32 restart_count = 6;
+}
+
+// Port mapping information
+message PortMapping {
+  // Container port (always present)
+  uint32 container_port = 1;
+  
+  // Protocol (tcp, udp, sctp)
+  string protocol = 2;
+  
+  // Host IP (e.g., "0.0.0.0", "127.0.0.1") - only if mapped
+  optional string host_ip = 3;
+  
+  // Host port - only if mapped to host
+  optional uint32 host_port = 4;
+}
+
+message ContainerDetails {
+  // Additional detailed information from inspect API
+  
+  // Command that was run
+  repeated string command = 1;
+  
+  // Working directory
+  string working_dir = 2;
+  
+  // Environment variables (may contain secrets - handle carefully)
+  repeated string env = 3;
+  
+  // Exposed ports
+  repeated string exposed_ports = 4;
+  
+  // Volume mounts
+  repeated VolumeMount mounts = 5;
+  
+  // Network information
+  repeated NetworkInfo networks = 6;
+  
+  // Resource limits
+  ResourceLimits limits = 7;
+
+  // Entrypoint command
+  repeated string entrypoint = 8;
+
+  // Container hostname
+  string hostname = 9;
+
+  // User the container process runs as
+  string user = 10;
+
+  // Restart policy configuration
+  optional RestartPolicy restart_policy = 11;
+
+  // Network mode (bridge, host, none, container:<id>)
+  string network_mode = 12;
+
+  // Healthcheck configuration (if defined)
+  optional HealthcheckConfig healthcheck = 13;
+
+  // Platform (e.g., "linux")
+  string platform = 14;
+
+  // Container runtime (e.g., "runc")
+  string runtime = 15;
+}
+
+// Container restart policy
+message RestartPolicy {
+  // Policy name: "no", "always", "unless-stopped", "on-failure"
+  string name = 1;
+
+  // Maximum retry count (for "on-failure" policy)
+  int32 max_retry_count = 2;
+}
+
+// Container healthcheck configuration
+message HealthcheckConfig {
+  // Test command to run
+  repeated string test = 1;
+
+  // Interval between health checks (nanoseconds)
+  int64 interval_ns = 2;
+
+  // Timeout for each check (nanoseconds)
+  int64 timeout_ns = 3;
+
+  // Number of retries before marking unhealthy
+  int32 retries = 4;
+
+  // Start period - grace time before checks begin (nanoseconds)
+  int64 start_period_ns = 5;
+}
+
+message VolumeMount {
+  string source = 1;
+  string destination = 2;
+  string mode = 3;  // "rw" or "ro"
+  string mount_type = 4;  // "bind", "volume", "tmpfs"
+  string propagation = 5;  // Mount propagation mode
+}
+
+message NetworkInfo {
+  string network_name = 1;
+  string ip_address = 2;
+  string gateway = 3;
+  string mac_address = 4;
+}
+
+message ResourceLimits {
+  optional int64 memory_limit_bytes = 1;
+  optional double cpu_limit = 2;  // CPU shares
+  optional int64 pids_limit = 3;
+}
+
+enum ContainerStateFilter {
+  CONTAINER_STATE_FILTER_UNSPECIFIED = 0;
+  CONTAINER_STATE_FILTER_ALL = 1;
+  CONTAINER_STATE_FILTER_RUNNING = 2;
+  CONTAINER_STATE_FILTER_PAUSED = 3;
+  CONTAINER_STATE_FILTER_EXITED = 4;
+  CONTAINER_STATE_FILTER_CREATED = 5;
+}
+
+service HealthService {
+  // Check agent health
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Watch health status changes (streaming)
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}
+
+message HealthCheckRequest {
+  // Service name to check (empty = overall agent health)
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  
+  // Human-readable message
+  string message = 2;
+  
+  // Timestamp of the health check
+  int64 timestamp = 3;
+  
+  // Additional metadata
+  map<string, string> metadata = 4;
+}
+
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_UNHEALTHY = 2;
+  HEALTH_STATUS_DEGRADED = 3;   // Partial functionality
+  HEALTH_STATUS_UNKNOWN = 4;
+}
+
+
+service StatsService {
+  // Get real-time statistics for a container
+  rpc GetContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse);
+  
+  // Stream statistics for a container (updates every 1-2 seconds)
+  rpc StreamContainerStats(ContainerStatsRequest) returns (stream ContainerStatsResponse);
+}
+
+message ContainerStatsRequest {
+  // Container ID (full or short hash)
+  string container_id = 1;
+  
+  // Stream mode: if true, continuously stream stats
+  bool stream = 2;
+}
+
+message ContainerStatsResponse {
+  // Container ID
+  string container_id = 1;
+  
+  // Timestamp of this stats snapshot
+  int64 timestamp = 2;
+  
+  // CPU statistics
+  CpuStats cpu_stats = 3;
+  
+  // Memory statistics
+  MemoryStats memory_stats = 4;
+  
+  // Network statistics
+  repeated NetworkStats network_stats = 5;
+  
+  // Block I/O statistics
+  BlockIoStats block_io_stats = 6;
+  
+  // Number of PIDs/processes
+  optional uint64 pids_count = 7;
+}
+
+message CpuStats {
+  // CPU usage percentage (0-100% per core, can exceed 100% on multi-core)
+  double cpu_percentage = 1;
+  
+  // Total CPU time consumed (nanoseconds)
+  uint64 total_usage = 2;
+  
+  // CPU time in kernel mode (nanoseconds)
+  uint64 system_usage = 3;
+  
+  // Number of CPU cores available to container
+  uint32 online_cpus = 4;
+  
+  // Per-CPU usage breakdown
+  repeated uint64 per_cpu_usage = 5;
+  
+  // CPU throttling statistics
+  optional CpuThrottlingStats throttling = 6;
+}
+
+message CpuThrottlingStats {
+  // Number of periods with throttling active
+  uint64 throttled_periods = 1;
+  
+  // Total number of periods
+  uint64 total_periods = 2;
+  
+  // Total time throttled (nanoseconds)
+  uint64 throttled_time = 3;
+}
+
+message MemoryStats {
+  // Current memory usage (bytes)
+  uint64 usage = 1;
+  
+  // Maximum memory usage recorded (bytes)
+  uint64 max_usage = 2;
+  
+  // Memory limit (bytes, 0 = unlimited)
+  uint64 limit = 3;
+  
+  // Memory usage percentage (0-100)
+  double percentage = 4;
+  
+  // Cache memory (bytes)
+  uint64 cache = 5;
+  
+  // RSS memory (bytes) - actual physical memory used
+  uint64 rss = 6;
+  
+  // Swap usage (bytes)
+  optional uint64 swap = 7;
+}
+
+message NetworkStats {
+  // Network interface name
+  string interface_name = 1;
+  
+  // Bytes received
+  uint64 rx_bytes = 2;
+  
+  // Packets received
+  uint64 rx_packets = 3;
+  
+  // Receive errors
+  uint64 rx_errors = 4;
+  
+  // Receive dropped packets
+  uint64 rx_dropped = 5;
+  
+  // Bytes transmitted
+  uint64 tx_bytes = 6;
+  
+  // Packets transmitted
+  uint64 tx_packets = 7;
+  
+  // Transmit errors
+  uint64 tx_errors = 8;
+  
+  // Transmit dropped packets
+  uint64 tx_dropped = 9;
+}
+
+message BlockIoStats {
+  // Total bytes read from disk
+  uint64 read_bytes = 1;
+  
+  // Total bytes written to disk
+  uint64 write_bytes = 2;
+  
+  // Total read operations
+  uint64 read_ops = 3;
+  
+  // Total write operations
+  uint64 write_ops = 4;
+  
+  // Per-device statistics
+  repeated BlockIoDeviceStats devices = 5;
+}
+
+message BlockIoDeviceStats {
+  // Device major number
+  uint64 major = 1;
+  
+  // Device minor number
+  uint64 minor = 2;
+  
+  // Bytes read
+  uint64 read_bytes = 3;
+  
+  // Bytes written
+  uint64 write_bytes = 4;
+}
+
+// ============================================================================
+// CONTROL SERVICE (Future Implementation - Stub)
+// ============================================================================
+// Purpose: Container lifecycle management (start/stop/restart/remove)
+// Security: Requires RBAC - only admin role can execute
+// Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED error
+
+service ControlService {
+  // Start a stopped container
+  rpc StartContainer(ContainerControlRequest) returns (ContainerControlResponse);
+  
+  // Stop a running container
+  rpc StopContainer(ContainerControlRequest) returns (ContainerControlResponse);
+  
+  // Restart a container
+  rpc RestartContainer(ContainerControlRequest) returns (ContainerControlResponse);
+  
+  // Pause a running container
+  rpc PauseContainer(ContainerControlRequest) returns (ContainerControlResponse);
+  
+  // Unpause a paused container
+  rpc UnpauseContainer(ContainerControlRequest) returns (ContainerControlResponse);
+  
+  // Remove a container (requires force flag if running)
+  rpc RemoveContainer(ContainerRemoveRequest) returns (ContainerControlResponse);
+}
+
+message ContainerControlRequest {
+  // Container ID
+  string container_id = 1;
+  
+  // Optional timeout for stop/restart operations (seconds)
+  optional uint32 timeout = 2;
+}
+
+message ContainerRemoveRequest {
+  // Container ID
+  string container_id = 1;
+  
+  // Force removal even if running
+  bool force = 2;
+  
+  // Remove associated volumes
+  bool remove_volumes = 3;
+}
+
+message ContainerControlResponse {
+  // Success status
+  bool success = 1;
+  
+  // Human-readable message
+  string message = 2;
+  
+  // Container ID
+  string container_id = 3;
+  
+  // New state after operation
+  string new_state = 4;
+}
+
+// ============================================================================
+// SHELL SERVICE (Future Implementation - Stub)
+// ============================================================================
+// Purpose: Interactive shell access to containers (like `docker exec -it`)
+// Security: Requires RBAC + audit logging
+// Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED error
+
+service ShellService {
+  // Open an interactive shell (bidirectional stream)
+  rpc OpenShell(stream ShellRequest) returns (stream ShellResponse);
+  
+  // Execute a one-shot command (non-interactive)
+  rpc ExecCommand(ExecCommandRequest) returns (ExecCommandResponse);
+}
+
+message ShellRequest {
+  // First message must be OpenShellInit
+  oneof request {
+    OpenShellInit init = 1;
+    ShellInput input = 2;
+    ShellResize resize = 3;
+  }
+}
+
+message OpenShellInit {
+  // Container ID
+  string container_id = 1;
+  
+  // Command to execute (default: ["/bin/sh"])
+  repeated string command = 2;
+  
+  // Working directory
+  optional string working_dir = 3;
+  
+  // Environment variables
+  map<string, string> env = 4;
+  
+  // Allocate a pseudo-TTY
+  bool tty = 5;
+  
+  // Initial terminal size
+  TerminalSize terminal_size = 6;
+}
+
+message ShellInput {
+  // Raw stdin bytes from the client terminal
+  bytes data = 1;
+}
+
+message ShellResize {
+  // New terminal size
+  TerminalSize size = 1;
+}
+
+message TerminalSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ShellResponse {
+  oneof response {
+    ShellOutput output = 1;
+    ShellExit exit = 2;
+    ShellError error = 3;
+  }
+}
+
+message ShellOutput {
+  // Raw stdout/stderr bytes
+  bytes data = 1;
+  
+  // Stream type
+  LogLevel stream = 2;
+}
+
+message ShellExit {
+  // Exit code
+  int32 exit_code = 1;
+  
+  // Human-readable message
+  string message = 2;
+}
+
+message ShellError {
+  // Error message
+  string message = 1;
+  
+  // Error code
+  string code = 2;
+}
+
+message ExecCommandRequest {
+  // Container ID
+  string container_id = 1;
+  
+  // Command to execute
+  repeated string command = 2;
+  
+  // Working directory
+  optional string working_dir = 3;
+  
+  // Environment variables
+  map<string, string> env = 4;
+  
+  // Capture stdout
+  bool capture_stdout = 5;
+  
+  // Capture stderr
+  bool capture_stderr = 6;
+  
+  // Timeout in seconds (0 = no timeout)
+  optional uint32 timeout = 7;
+}
+
+message ExecCommandResponse {
+  // Exit code
+  int32 exit_code = 1;
+  
+  // Captured stdout (if capture_stdout = true)
+  bytes stdout = 2;
+  
+  // Captured stderr (if capture_stderr = true)
+  bytes stderr = 3;
+  
+  // Execution time in milliseconds
+  int64 execution_time_ms = 4;
+  
+  // Whether the command was killed due to timeout
+  bool timed_out = 5;
+}
+
+
+// Note: gRPC uses Status codes, but these can be included in response metadata
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_CONTAINER_NOT_FOUND = 1;
+  ERROR_CODE_PERMISSION_DENIED = 2;
+  ERROR_CODE_INVALID_LOG_DRIVER = 3;
+  ERROR_CODE_DOCKER_CONNECTION_FAILED = 4;
+  ERROR_CODE_FILTER_REGEX_INVALID = 5;
+  ERROR_CODE_STREAM_CLOSED = 6;
+  ERROR_CODE_RATE_LIMIT_EXCEEDED = 7;
+  ERROR_CODE_UNSUPPORTED_OPERATION = 8;
+}

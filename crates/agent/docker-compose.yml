@@ -1,0 +1,52 @@
+services:
+  # Certificate generator - runs once to create certs
+  cert-generator:
+    image: alpine:latest
+    volumes:
+      - ./certs:/certs
+      - ./scripts:/scripts:ro
+    command: sh /scripts/generate-certs.sh
+    profiles:
+      - setup
+
+  # Docktail Agent
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docktail-agent
+    ports:
+      - "50051:50051"
+    volumes:
+      # Mount Docker socket to access containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount certificates
+      - ./certs:/etc/docktail/certs:ro
+      # Mount configuration file (optional - will use env vars if not present)
+      - ./config/agent.toml:/etc/docktail/agent.toml:ro
+    environment:
+      # Agent configuration
+      - AGENT_BIND_ADDRESS=0.0.0.0:50051
+      - AGENT_TLS_CERT=/etc/docktail/certs/agent.crt
+      - AGENT_TLS_KEY=/etc/docktail/certs/agent.key
+      - AGENT_TLS_CA=/etc/docktail/certs/ca.crt
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - AGENT_MAX_STREAMS=100
+      # Logging
+      - RUST_LOG=agent=info,tower_http=debug
+    restart: unless-stopped
+    networks:
+      - docktail
+
+  # Example container to test log streaming
+  test-container:
+    image: busybox:latest
+    container_name: docktail-test-app
+    command: sh -c "while true; do echo 'Hello from test container - $(date)'; sleep 2; done"
+    restart: unless-stopped
+    networks:
+      - docktail
+
+networks:
+  docktail:
+    driver: bridge

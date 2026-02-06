@@ -1,0 +1,11 @@
+target/
+certs/
+.git/
+.gitignore
+.idea/
+*.md
+docker-compose.yml
+Dockerfile
+scripts/
+*.log
+.env

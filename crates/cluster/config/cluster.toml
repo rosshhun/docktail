@@ -1,0 +1,99 @@
+# Docktail Cluster Configuration
+# Single unified configuration file for the cluster service
+#
+# PRODUCTION CHECKLIST:
+#   [ ] Set enable_graphiql = false (or omit, default is false)
+#   [ ] Set format = "json" for structured logging
+#   [ ] Review cors_origins list - remove development URLs
+#   [ ] Use absolute paths for TLS certificate files
+#   [ ] Review and adjust timeout values for your workload
+
+[server]
+bind_address = "0.0.0.0:8080"
+read_timeout_secs = 30
+write_timeout_secs = 30
+max_concurrent_streams = 1000
+enable_cors = true
+cors_origins = ["http://localhost:3000", "http://localhost:5173"]
+
+[agents]
+health_check_interval = 30
+reconnect_backoff = 5
+max_reconnect_attempts = 3
+
+# ============================================================================
+# Static Agents Configuration
+# ============================================================================
+# Configure based on your deployment scenario:
+
+# --- Docker Compose Deployment (ACTIVE) ---
+# Multiple agents in docker-compose setup
+[[agents.static_agents]]
+id = "agent-1"
+name = "Agent 1"
+address = "agent1:50051"
+tls_cert = "/etc/docktail/certs/client.crt"
+tls_key = "/etc/docktail/certs/client.key"
+tls_ca = "/etc/docktail/certs/ca.crt"
+tls_domain = "localhost"  # Must match certificate SAN
+
+[agents.static_agents.labels]
+env = "development"
+instance = "1"
+
+[[agents.static_agents]]
+id = "agent-2"
+name = "Agent 2"
+address = "agent2:50051"
+tls_cert = "/etc/docktail/certs/client.crt"
+tls_key = "/etc/docktail/certs/client.key"
+tls_ca = "/etc/docktail/certs/ca.crt"
+tls_domain = "localhost"
+
+[agents.static_agents.labels]
+env = "development"
+instance = "2"
+
+# --- Local Development ---
+# Single local agent for testing (use when running cluster outside Docker)
+# Uncomment this and comment out the Docker Compose section above when running locally
+# [[agents.static_agents]]
+# id = "agent-local"
+# name = "Local Docker Agent"
+# address = "localhost:50051"
+# tls_cert = "../agent/certs/client.crt"
+# tls_key = "../agent/certs/client.key"
+# tls_ca = "../agent/certs/ca.crt"
+# tls_domain = "localhost"
+# [agents.static_agents.labels]
+# env = "development"
+# location = "local"
+
+# --- Production Deployment ---
+# [[agents.static_agents]]
+# id = "agent-prod-us-east-1"
+# name = "Production Host US-East"
+# address = "agent-us-east.example.com:50051"
+# tls_cert = "/etc/docktail/certs/prod-client.crt"
+# tls_key = "/etc/docktail/certs/prod-client.key"
+# tls_ca = "/etc/docktail/certs/prod-ca.crt"
+# tls_domain = "agent-us-east.example.com"  # Must match certificate SAN
+# [agents.static_agents.labels]
+# env = "production"
+# region = "us-east-1"
+# datacenter = "aws"
+
+[security]
+# JWT and RBAC - (TODO: not yet implemented)
+# jwt_secret = "your-secret-key"
+# enable_rbac = false
+
+[logging]
+level = "info,cluster=debug"
+format = "pretty"  # Options: pretty, json
+output = "stdout"
+
+[graphql]
+enable_graphiql = false  # Enable in development only (set to true when needed)
+max_depth = 15
+max_complexity = 1000
