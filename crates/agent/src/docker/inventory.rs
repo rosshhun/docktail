@@ -1,7 +1,6 @@
 use bollard::models::{ContainerSummary, ContainerInspectResponse};
 use chrono::DateTime;
 
-/// Port mapping information
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PortMapping {
     pub container_port: u16,
@@ -10,7 +9,6 @@ pub struct PortMapping {
     pub host_port: Option<u16>,
 }
 
-/// Detailed container state information from docker inspect
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainerStateInfo {
     pub oom_killed: bool,
@@ -21,7 +19,6 @@ pub struct ContainerStateInfo {
     pub restart_count: i32,
 }
 
-/// Basic container information derived from Docker's list API.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ContainerInfo {
     pub id: String,         // Full container ID 64-char hash
@@ -29,7 +26,7 @@ pub struct ContainerInfo {
     pub image: String,        
     pub state: String,       // "running", "paused", "exited"
     pub status: String,      // "Up 2 hours"
-    pub log_driver: Option<String>,  // Critical for checking "Time-Travel" support
+    pub log_driver: Option<String>,  // Note: Critical for checking "Time-Travel" support
     pub labels: std::collections::HashMap<String, String>,
     pub created_at: i64,     // Unix timestamp (better for gRPC)
     pub ports: Vec<PortMapping>,  // Structured port mappings
@@ -38,7 +35,6 @@ pub struct ContainerInfo {
 
 impl From<ContainerSummary> for ContainerInfo {
     fn from(s: ContainerSummary) -> Self {
-        // Convert PortSummary to our PortMapping struct
         let ports = s.ports
             .unwrap_or_default()
             .into_iter()
@@ -79,7 +75,6 @@ impl From<ContainerSummary> for ContainerInfo {
 
 impl From<ContainerInspectResponse> for ContainerInfo {
     fn from(details: ContainerInspectResponse) -> Self {
-        // Extract Log Driver safely from deep nesting
         // Path: HostConfig -> LogConfig -> Type
         let log_driver = details.host_config
             .as_ref()
@@ -87,14 +82,13 @@ impl From<ContainerInspectResponse> for ContainerInfo {
             .and_then(|lc| lc.typ.clone());
 
         // Parse "Created" time (RFC3339 string format)
-        // Inspect returns a String (RFC3339) unlike List which returns i64
+        // Inspect returns a String (RFC3339)
         let created_at = details.created.as_deref()
             .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
             .map(|dt| dt.timestamp())
             .unwrap_or(0);
 
-        // Extract ports from inspect response
-        // NetworkSettings -> Ports is a HashMap<String, Option<Vec<PortBinding>>>
+
         let ports = details.network_settings
             .as_ref()
             .and_then(|ns| ns.ports.as_ref())
@@ -107,11 +101,9 @@ impl From<ContainerInspectResponse> for ContainerInfo {
                             .unwrap_or((container_port_str.as_str(), "tcp"));
                         let container_port = port_num.parse::<u16>().unwrap_or(0);
                         
-                        // Handle both None and Some([]) as "exposed but not bound"
                         let bindings_list = bindings.as_deref().unwrap_or(&[]);
                         
                         if !bindings_list.is_empty() {
-                            // Port is bound to host (can have multiple bindings)
                             bindings_list.iter().map(|binding| {
                                 let host_ip = binding.host_ip.clone();
                                 let host_port = binding.host_port.as_ref()
@@ -125,7 +117,6 @@ impl From<ContainerInspectResponse> for ContainerInfo {
                                 }
                             }).collect::<Vec<_>>()
                         } else {
-                            // Port is exposed but not bound
                             vec![PortMapping {
                                 container_port,
                                 protocol: protocol.to_string(),
@@ -138,7 +129,6 @@ impl From<ContainerInspectResponse> for ContainerInfo {
             })
             .unwrap_or_default();
 
-        // Extract detailed state information from inspect
         let state_info = details.state.as_ref().map(|s| {
             ContainerStateInfo {
                 oom_killed: s.oom_killed.unwrap_or(false),
@@ -160,14 +150,12 @@ impl From<ContainerInspectResponse> for ContainerInfo {
                 .and_then(|s| s.status.as_ref())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".into()),
-            // Status is often empty in Inspect, unlike List
-            // We reconstruct it from state
             status: details.state.as_ref()
                 .and_then(|s| s.status.as_ref())
                 .map(|s| format!("{:?}", s))
                 .unwrap_or_default(),
             
-            log_driver, // Critical for time-travel support validation
+            log_driver, // Note: Critical for time-travel support validation
             
             labels: details.config
                 .and_then(|c| c.labels)
