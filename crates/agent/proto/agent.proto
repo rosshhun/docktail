@@ -6,7 +6,7 @@ package docktail.agent;
 
 service LogService {
   // Stream logs from a container with optional filtering and time-travel
-  // Returns NormalizedLogEntry with parsed structured data (BREAKING CHANGE in v0.2.0)
+  // Returns NormalizedLogEntry with parsed structured data
   rpc StreamLogs(LogStreamRequest) returns (stream NormalizedLogEntry);
 }
 
@@ -40,7 +40,7 @@ message LogStreamRequest {
   bool disable_parsing = 9;
 }
 
-// NEW in v0.2.0: Normalized log entry with parsed structure
+// Normalized log entry with parsed structure
 message NormalizedLogEntry {
   // Original fields (preserved for backward compatibility)
   string container_id = 1;
@@ -51,13 +51,13 @@ message NormalizedLogEntry {
   // Raw log content (always preserved)
   bytes raw_content = 5;
   
-  // NEW: Parsed structured fields (null if parsing failed or disabled)
+  // Parsed structured fields (null if parsing failed or disabled)
   optional ParsedLog parsed = 6;
   
-  // NEW: Metadata about parsing operation
+  // Metadata about parsing operation
   ParseMetadata metadata = 7;
   
-  // NEW in Phase 4: Multiline grouping support
+  // Multiline grouping support
   repeated LogLine grouped_lines = 10;   // Continuation lines (empty if not grouped)
   uint32 line_count = 11;                // Total lines (1 = single line)
   bool is_grouped = 12;                  // Quick check for UI
@@ -78,7 +78,7 @@ message ParsedLog {
   optional string logger = 3;       // Logger name (e.g., "app.users")
   optional google.protobuf.Timestamp timestamp = 4;     // App-provided timestamp (if different from Docker)
   
-  // Request context (common in web apps)
+  // Request context
   optional RequestContext request = 5;
   
   // Error context (for errors)
@@ -129,26 +129,6 @@ enum LogFormat {
   LOG_FORMAT_PLAIN_TEXT = 3;
   LOG_FORMAT_SYSLOG = 4;
   LOG_FORMAT_HTTP_LOG = 5;
-}
-
-// DEPRECATED: Use NormalizedLogEntry instead
-// Kept temporarily for reference, will be removed in v0.3.0
-message LogStreamResponse {
-  // Container ID this log belongs to
-  string container_id = 1;
-  
-  // Unix timestamp in nanoseconds for precision
-  int64 timestamp_nanos = 2;
-  
-  // Stream type (stdout or stderr)
-  LogLevel log_level = 3;
-  
-  // Raw log content (binary-safe, not necessarily UTF-8)
-  bytes content = 4;
-  
-  // Sequence number for gap detection and ordering
-  // Monotonically increasing per stream
-  uint64 sequence = 5;
 }
 
 enum LogLevel {
@@ -567,7 +547,8 @@ message BlockIoDeviceStats {
 // ============================================================================
 // Purpose: Container lifecycle management (start/stop/restart/remove)
 // Security: Requires RBAC - only admin role can execute
-// Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED error
+// Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED 
+// TODO: Needs Implementation
 
 service ControlService {
   // Start a stopped container
@@ -628,6 +609,7 @@ message ContainerControlResponse {
 // Purpose: Interactive shell access to containers (like `docker exec -it`)
 // Security: Requires RBAC + audit logging
 // Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED error
+// TODO: Needs Implementation
 
 service ShellService {
   // Open an interactive shell (bidirectional stream)
@@ -753,8 +735,6 @@ message ExecCommandResponse {
   bool timed_out = 5;
 }
 
-
-// Note: gRPC uses Status codes, but these can be included in response metadata
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   ERROR_CODE_CONTAINER_NOT_FOUND = 1;
