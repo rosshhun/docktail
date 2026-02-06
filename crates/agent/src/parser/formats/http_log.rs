@@ -4,40 +4,31 @@ pub struct HttpLogDetector;
 
 impl FormatDetector for HttpLogDetector {
     fn detect(&self, sample: &[u8]) -> DetectionResult {
-        // Look for Common Log Format / Combined Log Format pattern
-        // 127.0.0.1 ... [10/Oct/2000:13:55:36 -0700] "GET /... HTTP/1.0" 200 ...
-        
         let s = match std::str::from_utf8(sample) {
             Ok(v) => v,
             Err(_) => return DetectionResult::no_match(),
         };
 
-        // 1. Must have [ and ]
         let open_bracket = match s.find('[') {
             Some(i) => i,
             None => return DetectionResult::no_match(),
         };
         
-        // 2. Must have " after ]
-        // We look for closing bracket matching the opened one
         let close_bracket = match s[open_bracket..].find(']') {
             Some(i) => open_bracket + i,
             None => return DetectionResult::no_match(),
         };
         
-        // Check content between brackets looks vaguely like date (contains / or :)
         let date_part = &s[open_bracket+1..close_bracket];
         if !date_part.contains('/') && !date_part.contains(':') {
              return DetectionResult::no_match();
         }
 
-        // 3. Look for request start "
         let quote_start = match s[close_bracket..].find('"') {
             Some(i) => close_bracket + i,
             None => return DetectionResult::no_match(),
         };
 
-        // 4. Check if request starts with method
         let request_part = &s[quote_start+1..];
         if request_part.starts_with("GET ") || 
            request_part.starts_with("POST ") || 

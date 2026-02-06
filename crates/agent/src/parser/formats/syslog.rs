@@ -7,22 +7,17 @@ impl FormatDetector for SyslogDetector {
         // Check for Syslog priority prefix <PRI>
         // Example: <165>1 2026-02-04T... (RFC 5424) or <34>Oct 11... (RFC 3164)
         
-        // Must start with <
         if sample.iter().next() != Some(&b'<') {
             return DetectionResult::no_match();
         }
 
-        // Must have matching > within first 5 chars
         let max_pri_len = 5;
         let p_end = sample.iter().take(max_pri_len + 1).position(|&c| c == b'>');
 
         if let Some(idx) = p_end {
-            // Check content between < and > are digits
             let pri_slice = &sample[1..idx];
             
-            // Should be non-empty and all digits
             if !pri_slice.is_empty() && pri_slice.iter().all(|c| c.is_ascii_digit()) {
-                // It looks like a syslog header
                 return DetectionResult::new(LogFormat::Syslog, 0.85);
             }
         }

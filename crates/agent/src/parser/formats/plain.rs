@@ -2,13 +2,11 @@ use crate::parser::traits::*;
 use crate::parser::MAX_LINE_SIZE;
 use bytes::Bytes;
 
-/// Plain text detector (fallback - always matches with low confidence)
 pub struct PlainTextDetector;
+pub struct PlainTextParser;
 
 impl FormatDetector for PlainTextDetector {
     fn detect(&self, _sample: &[u8]) -> DetectionResult {
-        // Plain text is the safe fallback
-        // Always matches with low confidence so other detectors take precedence
         DetectionResult::new(LogFormat::PlainText, 0.1)
     }
 
@@ -17,18 +15,12 @@ impl FormatDetector for PlainTextDetector {
     }
 }
 
-/// Plain text parser (pass-through with minimal processing)
-pub struct PlainTextParser;
-
 impl LogParser for PlainTextParser {
     fn parse(&self, raw: &[u8]) -> Result<ParsedLog, ParseError> {
-        // SECURITY: Enforce size limit to prevent DoS via massive log lines
         if raw.len() > MAX_LINE_SIZE {
             return Err(ParseError::LineTooLarge(raw.len(), MAX_LINE_SIZE));
         }
 
-        // Plain text parsing is just wrapping in ParsedLog
-        // Try to extract a message if it's valid UTF-8
         let message = std::str::from_utf8(raw)
             .ok()
             .map(|s| s.trim_end().to_string())
@@ -91,7 +83,6 @@ mod tests {
         let binary = b"\xFF\xFE\x00\x01";
         let parsed = parser.parse(binary).unwrap();
         
-        // Should still succeed, just no message extracted
         assert_eq!(parsed.message, None);
         assert_eq!(parsed.raw_content.as_ref(), binary);
     }
@@ -100,14 +91,11 @@ mod tests {
     fn test_plain_text_parser_size_limit() {
         let parser = PlainTextParser;
         
-        // Create a log line that exceeds MAX_LINE_SIZE
         let oversized = vec![b'X'; MAX_LINE_SIZE + 1];
         let result = parser.parse(&oversized);
         
-        // Should fail with LineTooLarge error
         assert!(matches!(result, Err(ParseError::LineTooLarge(_, _))));
         
-        // Just under the limit should succeed
         let just_under = vec![b'Y'; MAX_LINE_SIZE];
         let parsed = parser.parse(&just_under).unwrap();
         assert!(parsed.message.is_some());

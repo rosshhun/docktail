@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use super::LogFormat;
 
-/// State for a specific container's parser
 #[derive(Debug, Clone, Copy)]
 pub struct ContainerState {
     pub format: LogFormat,
@@ -26,7 +25,6 @@ impl ParserCache {
         }
     }
  
-    /// Get the cached format for a container (if enabled)
     pub fn get_format(&self, container_id: &str) -> Option<LogFormat> {
         self.state.get(container_id).and_then(|r| {
             if r.is_enabled {
@@ -40,9 +38,7 @@ impl ParserCache {
         })
     }
 
-    /// Check if parsing is disabled for a container
-    /// Returns true if the container is in the cache but parsing is disabled
-    /// Returns false if the container is not in cache or parsing is enabled
+    /// Returns `true` if the container is cached but parsing is disabled.
     pub fn is_disabled(&self, container_id: &str) -> bool {
         self.state.get(container_id).map(|r| !r.is_enabled).unwrap_or(false)
     }
@@ -51,10 +47,7 @@ impl ParserCache {
     pub fn set_format(&self, container_id: String, format: LogFormat) {
         // Upsert: If exists, update format. If new, insert with enabled=true
         self.state.entry(container_id).and_modify(|s| {
-            // Only re-enable if the format has CHANGED.
-            // If we previously disabled "Json" parsing because of errors, and detection
-            // says "It's Json" again, we should stay disabled to avoid an infinite
-            // Enable -> Fail -> Disable -> Detect -> Enable loop.
+            // Stay disabled on re-detection to avoid enable-fail loop.
             if s.format != format {
                 s.format = format;
                 s.is_enabled = true; 
@@ -65,14 +58,13 @@ impl ParserCache {
         });
     }
 
-    /// Disable parsing for a container (fallback to plain text)
+    /// fallbacks to plain text
     pub fn disable_parsing(&self, container_id: &str) {
         if let Some(mut entry) = self.state.get_mut(container_id) {
             entry.is_enabled = false;
         }
     }
 
-    /// Enable parsing for a container
     pub fn enable_parsing(&self, container_id: &str) {
         if let Some(mut entry) = self.state.get_mut(container_id) {
             entry.is_enabled = true;
@@ -96,8 +88,6 @@ impl ParserCache {
         self.state.is_empty()
     }
 
-    /// Get statistics about the cache
-    /// This is now atomic-ish (iterating one map is safer than correlating two)
     pub fn stats(&self) -> CacheStats {
         let mut stats = CacheStats {
             total_containers: 0,
@@ -142,7 +132,6 @@ impl Default for ParserCache {
     }
 }
 
-/// Cache statistics
 #[derive(Debug, Clone, Default)]
 pub struct CacheStats {
     pub total_containers: usize,
@@ -164,15 +153,12 @@ mod tests {
     fn test_cache_lifecycle() {
         let cache = ParserCache::new();
         
-        // 1. Set Format
         cache.set_format("c1".to_string(), LogFormat::Json);
         assert_eq!(cache.get_format("c1"), Some(LogFormat::Json));
 
-        // 2. Disable
         cache.disable_parsing("c1");
         assert_eq!(cache.get_format("c1"), None, "Should return None when disabled");
 
-        // 3. Re-enable
         cache.enable_parsing("c1");
         assert_eq!(cache.get_format("c1"), Some(LogFormat::Json));
     }
@@ -198,12 +184,10 @@ mod tests {
     
     #[test]
     fn test_set_format_re_enables() {
-        // If a container was disabled, detecting a new format should probably re-enable it
         let cache = ParserCache::new();
         cache.set_format("c1".to_string(), LogFormat::Json);
         cache.disable_parsing("c1");
         
-        // New detection happens (e.g. logs changed format)
         cache.set_format("c1".to_string(), LogFormat::Logfmt);
         
         let stats = cache.stats();
@@ -214,19 +198,15 @@ mod tests {
 
     #[test]
     fn test_set_format_no_reenable_same_format() {
-        // PREVENT LOOP: If disabled, setting SAME format should NOT re-enable
         let cache = ParserCache::new();
         cache.set_format("c1".to_string(), LogFormat::Json);
         cache.disable_parsing("c1");
         
-        // Detection runs again, finds JSON again
         cache.set_format("c1".to_string(), LogFormat::Json);
         
         let stats = cache.stats();
-        // Should STILL be disabled
         assert_eq!(stats.disabled_containers, 1);
         assert_eq!(stats.enabled_containers, 0);
-        // get_format returns None because disabled
         assert_eq!(cache.get_format("c1"), None);
     }
 }

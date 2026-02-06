@@ -1,12 +1,3 @@
-/// ANSI escape code stripping and Docker timestamp handling
-/// 
-/// Docker logs often contain ANSI color codes from applications using colored
-/// terminal output. These need to be stripped before parsing to avoid false
-/// negatives in format detection.
-/// 
-/// Additionally, Docker prepends its own timestamp to log lines which needs
-/// to be removed from the content (the timestamp is already extracted separately).
-
 use std::borrow::Cow;
 
 /// Strip Docker timestamp prefix from log content
@@ -21,15 +12,14 @@ use std::borrow::Cow;
 /// Pattern: YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ (space after)
 pub fn strip_docker_timestamp(input: &[u8]) -> &[u8] {
     // Docker/Podman timestamp formats:
-    // - Docker: 2026-01-30T03:29:06.691716216Z 
-    // - Podman: 2026-01-30T03:29:06Z or 2026-01-30 03:29:06Z (space variant)
+    // Docker: 2026-01-30T03:29:06.691716216Z 
+    // Podman: 2026-01-30T03:29:06Z or 2026-01-30 03:29:06Z (space variant)
     // Minimum length: 20 chars (YYYY-MM-DD HH:MM:SSZ) + space = 21 bytes
     if input.len() < 21 {
         return input;
     }
     
-    // Quick check: does it look like an ISO8601 timestamp?
-    // YYYY-MM-DD starts with digit, has dashes at positions 4 and 7
+    // ISO8601 timestamp?, YYYY-MM-DD starts with digit, has dashes at positions 4 and 7
     if !input[0].is_ascii_digit() || input[4] != b'-' || input[7] != b'-' {
         return input;
     }
@@ -65,7 +55,7 @@ pub fn strip_docker_timestamp(input: &[u8]) -> &[u8] {
 /// - OSC sequences: `\x1b]...`
 /// - Other escape sequences
 /// 
-/// Returns Cow::Borrowed if no codes were found (Zero Allocation),
+/// Returns Cow::Borrowed if no codes were found,
 /// or Cow::Owned if stripping occurred.
 pub fn strip_ansi_codes(input: &[u8]) -> Cow<'_, [u8]> {
     // Optimization: Quick scan for ESC (0x1b). 
@@ -118,7 +108,7 @@ pub fn strip_ansi_codes(input: &[u8]) -> Cow<'_, [u8]> {
                 continue;
             }
             
-            // Simple Fe sequences (ESC + single char, e.g. ESC N)
+            // Fe sequences (ESC + single char, e.g. ESC N)
             // Range 0x40-0x5F
             if input[i + 1] >= 0x40 && input[i + 1] <= 0x5F {
                 i += 2;
@@ -126,7 +116,7 @@ pub fn strip_ansi_codes(input: &[u8]) -> Cow<'_, [u8]> {
             }
         }
         
-        // Regular character - copy it
+        // copy if regular character
         output.push(input[i]);
         i += 1;
     }
@@ -185,7 +175,6 @@ mod tests {
 
     #[test]
     fn test_strip_ansi_cow_optimization() {
-        // Ensure no allocation for plain strings
         let input = b"Hello World";
         let output = strip_ansi_codes(input);
         match output {
@@ -203,7 +192,6 @@ mod tests {
 
     #[test]
     fn test_strip_complex_ansi() {
-        // Real example from tracing logs
         let input = b"\x1b[2m2026-01-30T03:18:50.827498Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mcluster\x1b[0m\x1b[2m:\x1b[0m Starting Docktail";
         let output = strip_ansi_codes(input);
         assert_eq!(output.as_ref(), b"2026-01-30T03:18:50.827498Z  INFO cluster: Starting Docktail");
@@ -247,8 +235,6 @@ mod tests {
 
     #[test]
     fn test_performance_cow_optimization() {
-        // Verify that Cow::Borrowed is returned for plain text
-        // This is the key optimization - no allocation for clean logs
         let plain_logs = vec![
             b"{\"level\":\"info\",\"msg\":\"Application started\"}".as_slice(),
             b"2026-01-30T10:15:30.123Z INFO server listening on :8080".as_slice(),
@@ -273,7 +259,6 @@ mod tests {
 
     #[test]
     fn test_strip_docker_timestamp_at_very_end() {
-        // Timestamp is at the very end of the string without trailing newline or space
         let input = b"2026-01-30T03:29:06.123Z";
         let output = strip_docker_timestamp(input);
         assert_eq!(output, b"");
