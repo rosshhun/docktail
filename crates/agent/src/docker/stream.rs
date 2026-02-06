@@ -6,9 +6,7 @@ use tokio_stream::Stream;
 use crate::docker::client::DockerError;
 use crate::filter::engine::{FilterEngine, FilterMode};
 
-// Cooperative yielding budget: prevents executor starvation during heavy filtering.
-// Set high (1024) because filter checks are cheap regex matches on single lines;
-// a low budget causes tight yield/reschedule loops when many lines are filtered out.
+// prevents executor starvation during heavy filtering.
 const POLL_BUDGET: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,23 +26,23 @@ pub struct LogStreamRequest {
 }
 
 pub struct LogStreamResponse {
-    pub container_id: Arc<str>,          // Zero-copy reference
-    pub timestamp: i64,                  // Unix nanoseconds for precision
-    pub log_level: LogLevel,             // Stdout or Stderr
-    pub content: bytes::Bytes,           // Using Bytes (not Vec<u8>)
-    pub sequence: u64,                   // Ensures ordering, detects gaps
+    pub container_id: Arc<str>,          
+    pub timestamp: i64,                  
+    pub log_level: LogLevel,             
+    pub content: bytes::Bytes,          
+    pub sequence: u64,                   
 }
 
 pub struct LogLine {
     pub timestamp: i64,
     pub stream_type: LogLevel,
-    pub content: bytes::Bytes,  // Memory-efficient
+    pub content: bytes::Bytes,
 }
 pub struct LogStream {
-    pub container_id: Arc<str>,  // Arc for zero-cost cloning in high-throughput scenarios
+    pub container_id: Arc<str>,  
     pub inner_stream: Pin<Box<dyn Stream<Item = Result<LogLine, DockerError>> + Send>>,
     pub filter: Option<Arc<FilterEngine>>,
-    pub sequence_counter: AtomicU64,  // For generating sequence numbers
+    pub sequence_counter: AtomicU64,  
 }
 
 impl LogStream {
@@ -54,7 +52,7 @@ impl LogStream {
         filter: Option<Arc<FilterEngine>>,
     ) -> Self {
         Self {
-            container_id: container_id.into(),  // Convert String -> Arc<str> once
+            container_id: container_id.into(),  
             inner_stream: Box::pin(inner_stream),
             filter,
             sequence_counter: AtomicU64::new(0),
@@ -66,7 +64,6 @@ impl Stream for LogStream {
     type Item = Result<LogStreamResponse, DockerError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Manual budget for cooperative multitasking (stable Rust compatible)
         let mut budget = POLL_BUDGET;
 
         loop {
@@ -96,7 +93,7 @@ impl Stream for LogStream {
                             
                             // Build response (only allocates for matching lines)
                             let response = LogStreamResponse {
-                                container_id: Arc::clone(&this.container_id), // Atomic increment only
+                                container_id: Arc::clone(&this.container_id), 
                                 timestamp: line.timestamp,
                                 log_level: line.stream_type,
                                 content: line.content,
