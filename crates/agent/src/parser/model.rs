@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
 use super::serde_utils::serialize_fields_as_map;
 
-/// Supported log formats
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
@@ -35,12 +35,10 @@ impl LogFormat {
     }
 }
 
-/// Result of format detection with confidence score
 #[derive(Debug, Clone)]
 pub struct DetectionResult {
-    /// Detected format
     pub format: LogFormat,
-    /// Confidence score (0.0 - 1.0)
+    /// Confidence level (0.0 - 1.0)
     /// - 0.0-0.5: Low confidence (might be wrong)
     /// - 0.5-0.8: Medium confidence (likely correct)
     /// - 0.8-1.0: High confidence (very likely correct)
@@ -82,7 +80,6 @@ impl DetectionResult {
     }
 }
 
-/// Error types for parsing operations
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("Invalid format: {0}")]
@@ -104,7 +101,6 @@ pub enum ParseError {
     ParseFailed(String),
 }
 
-/// Parsed structured log data
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedLog {
     /// Log level (info, warn, error, debug, etc.)
@@ -123,7 +119,6 @@ pub struct ParsedLog {
     /// Request context (for web apps)
     pub request: Option<RequestContext>,
     
-    /// Error context (for errors)
     pub error: Option<ErrorContext>,
     
     /// Additional structured fields (key-value pairs)
@@ -181,7 +176,6 @@ pub struct RequestContext {
     pub request_id: Option<String>,    // Correlation ID
 }
 
-/// Error context
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorContext {
     pub error_type: Option<String>,    // Exception class
@@ -191,16 +185,12 @@ pub struct ErrorContext {
     pub line: Option<i32>,
 }
 
-/// Parse metadata (info about the parsing operation)
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ParseMetadata {
-    /// Detected format
     pub detected_format: LogFormat,
-    /// Whether parsing succeeded
     pub parse_success: bool,
-    /// Parse error if any
     pub parse_error: Option<String>,
-    /// Time taken to parse (nanoseconds)
     pub parse_time_nanos: i64,
 }
 

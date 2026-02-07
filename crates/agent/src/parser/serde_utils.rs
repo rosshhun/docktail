@@ -3,8 +3,6 @@ use serde::{Serializer, Deserializer};
 use serde::ser::SerializeMap;
 use serde::de::Visitor;
 
-/// Helper to serialize Vec<(String, String)> as a JSON Object {"key": "val"}
-/// This provides more efficient representation than array of tuples
 pub fn serialize_fields_as_map<S>(fields: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -16,7 +14,6 @@ where
     map.end()
 }
 
-/// Helper to deserialize a JSON Object {"key": "val"} back into Vec<(String, String)>
 pub fn deserialize_fields_from_map<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
 where
     D: Deserializer<'de>,

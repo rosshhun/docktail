@@ -6,23 +6,16 @@ use crate::state::SharedState;
 use crate::docker::inventory::ContainerInfo;
 use dashmap::DashMap;
 
-/// Core logic for "Mark and Sweep" synchronization
-/// Extracted to allow unit testing without a real Docker daemon
 fn perform_mark_and_sweep(inventory: &DashMap<String, ContainerInfo>, containers: Vec<ContainerInfo>) {
-    // Phase 1: MARK - Collect IDs of all active containers
     let active_ids: HashSet<String> = containers
         .iter()
         .map(|c| c.id.clone())
         .collect();
     
-    // Phase 2: UPSERT - Update existing entries and insert new ones
-    // The cache remains populated during this entire process (no flickering)
     for container in containers {
         inventory.insert(container.id.clone(), container);
     }
     
-    // Phase 3: SWEEP - Remove dead containers
-    // Only remove entries that are NOT in the active_ids set
     inventory.retain(|id, _| active_ids.contains(id));
 }
 
@@ -110,7 +103,6 @@ mod tests {
     use dashmap::DashMap;
     use std::collections::HashMap;
 
-    // Helper to create a dummy container
     fn create_container(id: &str, name: &str) -> ContainerInfo {
         ContainerInfo {
             id: id.to_string(),
@@ -161,12 +153,10 @@ mod tests {
     fn test_mark_and_sweep_removes_dead_containers() {
         let inventory = DashMap::new();
         
-        // Initial state: 3 containers
         inventory.insert("1".to_string(), create_container("1", "keep-me"));
         inventory.insert("2".to_string(), create_container("2", "remove-me"));
         inventory.insert("3".to_string(), create_container("3", "keep-me-too"));
 
-        // New state: Only 1 and 3 remain
         let containers = vec![
             create_container("1", "keep-me"),
             create_container("3", "keep-me-too"),
@@ -185,7 +175,6 @@ mod tests {
         let inventory = DashMap::new();
         inventory.insert("1".to_string(), create_container("1", "gone"));
 
-        // Docker returns empty list -> Everything is gone
         perform_mark_and_sweep(&inventory, vec![]);
 
         assert!(inventory.is_empty());
@@ -195,7 +184,6 @@ mod tests {
     fn test_mark_and_sweep_no_flicker_empty_to_full() {
         let inventory = DashMap::new();
         
-        // This simulates startup or recovery
         let containers = vec![create_container("1", "new")];
         perform_mark_and_sweep(&inventory, containers);
 

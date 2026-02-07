@@ -23,8 +23,6 @@ use super::proto::{
     KeyValuePair, LogFormat as ProtoLogFormat,
 };
 
-/// Implementation of the LogService gRPC service
-/// Handles log streaming with filtering, parsing, and time-travel support
 pub struct LogServiceImpl {
     state: SharedState,
 }
@@ -61,12 +59,11 @@ impl LogServiceImpl {
             return format;
         }
 
-        // 2. Cache hit: format was already resolved in a previous stream
         if let Some(cached) = parser_cache.get_format(container_id) {
             return cached;
         }
 
-        // 3. Single-line heuristic: fast byte-level check on first line
+        // Single-line heuristic: fast byte-level check on first line
         let format = Self::quick_detect_format(first_line);
         parser_cache.set_format(container_id.to_string(), format);
         metrics.record_detection(format != LogFormat::Unknown);
@@ -311,9 +308,7 @@ impl LogService for LogServiceImpl {
                         let sequence = log_response.sequence;
 
                         // Docker timestamp is already stripped by convert_bollard_log in client.rs.
-                        // Do NOT call strip_docker_timestamp again here — it would eat
-                        // the application's own timestamp prefix (e.g. tracing, log4j).
-                        // Step 1: Strip ANSI escape codes
+                        // Strip ANSI escape codes
                         let cleaned = strip_ansi_codes(&log_line.content);
                         let cleaned_bytes = cleaned.as_ref();
 

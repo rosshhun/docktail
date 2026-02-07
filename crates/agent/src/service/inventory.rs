@@ -27,7 +27,7 @@ impl InventoryServiceImpl {
         Self { state }
     }
 
-    /// Convert internal ContainerInfo to protobuf
+
     fn convert_container_info(info: crate::docker::inventory::ContainerInfo) -> ProtoContainerInfo {
         ProtoContainerInfo {
             id: info.id,
@@ -55,8 +55,6 @@ impl InventoryServiceImpl {
         }
     }
 
-    /// Extract ContainerDetails from Bollard's ContainerInspectResponse
-    /// Includes ports, mounts, networks, and resource limits
     fn extract_container_details(inspect: &BollardInspectResponse) -> Option<ContainerDetails> {
         // Extract exposed ports from NetworkSettings.Ports
         let mut exposed_ports = Vec::new();
@@ -150,37 +148,30 @@ impl InventoryServiceImpl {
             }
         });
 
-        // Extract command
         let command = inspect.config.as_ref()
             .and_then(|c| c.cmd.clone())
             .unwrap_or_default();
 
-        // Extract working directory
         let working_dir = inspect.config.as_ref()
             .and_then(|c| c.working_dir.clone())
             .unwrap_or_default();
 
-        // Extract environment variables
         let env = inspect.config.as_ref()
             .and_then(|c| c.env.clone())
             .unwrap_or_default();
 
-        // Extract entrypoint
         let entrypoint = inspect.config.as_ref()
             .and_then(|c| c.entrypoint.clone())
             .unwrap_or_default();
 
-        // Extract hostname
         let hostname = inspect.config.as_ref()
             .and_then(|c| c.hostname.clone())
             .unwrap_or_default();
 
-        // Extract user
         let user = inspect.config.as_ref()
             .and_then(|c| c.user.clone())
             .unwrap_or_default();
 
-        // Extract restart policy
         let restart_policy = inspect.host_config.as_ref()
             .and_then(|hc| hc.restart_policy.as_ref())
             .map(|rp| ProtoRestartPolicy {
@@ -192,12 +183,10 @@ impl InventoryServiceImpl {
                     .unwrap_or(0),
             });
 
-        // Extract network mode
         let network_mode = inspect.host_config.as_ref()
             .and_then(|hc| hc.network_mode.clone())
             .unwrap_or_default();
 
-        // Extract healthcheck configuration
         let healthcheck = inspect.config.as_ref()
             .and_then(|c| c.healthcheck.as_ref())
             .map(|hc| ProtoHealthcheckConfig {
@@ -208,10 +197,8 @@ impl InventoryServiceImpl {
                 start_period_ns: hc.start_period.unwrap_or(0),
             });
 
-        // Extract platform
         let platform = inspect.platform.clone().unwrap_or_default();
 
-        // Extract runtime
         let runtime = inspect.host_config.as_ref()
             .and_then(|hc| hc.runtime.clone())
             .unwrap_or_default();
@@ -235,7 +222,6 @@ impl InventoryServiceImpl {
         })
     }
 
-    /// Optimized filter: avoids string allocation in the hot loop
     fn apply_state_filter(
         containers: Vec<crate::docker::inventory::ContainerInfo>,
         filter: i32,
@@ -283,12 +269,10 @@ impl InventoryService for InventoryServiceImpl {
             .map(|entry| entry.value().clone())
             .collect();
 
-        // 1. Apply State Filter
         if let Some(state_filter) = req.state_filter {
             containers = Self::apply_state_filter(containers, state_filter);
         }
 
-        // 2. Apply "Include Stopped" Logic
         // Logic: ONLY filter out non-running if:
         // a) include_stopped is FALSE AND
         // b) We haven't already filtered for a specific state that might be stopped.
@@ -343,10 +327,8 @@ impl InventoryService for InventoryServiceImpl {
                 _ => Status::internal(format!("Docker inspect raw failed: {}", e)),
             })?;
 
-        // Derive basic info from raw response locally
         let info = crate::docker::inventory::ContainerInfo::from(raw_inspect.clone());
 
-        // Extract detailed information (ports, mounts, networks, etc.)
         let details = Self::extract_container_details(&raw_inspect);
 
         // Update cache with the fresh truth
@@ -390,7 +372,6 @@ mod tests {
             create_test_container("4", "created"),
         ];
 
-        // Test Running
         let running = InventoryServiceImpl::apply_state_filter(
             containers.clone(), 
             ContainerStateFilter::Running as i32
@@ -398,7 +379,6 @@ mod tests {
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].state, "running");
 
-        // Test Exited
         let exited = InventoryServiceImpl::apply_state_filter(
             containers.clone(), 
             ContainerStateFilter::Exited as i32
@@ -406,7 +386,6 @@ mod tests {
         assert_eq!(exited.len(), 1);
         assert_eq!(exited[0].state, "exited");
 
-        // Test All (should return all)
         let all = InventoryServiceImpl::apply_state_filter(
             containers.clone(), 
             ContainerStateFilter::All as i32
@@ -416,7 +395,6 @@ mod tests {
 
     #[test]
     fn test_extract_container_details_cpu_limits() {
-        // Case 1: nano_cpus (Active)
         let mut hc = HostConfig::default();
         hc.nano_cpus = Some(1_500_000_000); // 1.5 CPUs
         hc.memory = Some(1024);
@@ -432,7 +410,6 @@ mod tests {
         let limits = details.limits.expect("Should have limits");
         assert_eq!(limits.cpu_limit, Some(1.5));
 
-        // Case 2: quota/period (Legacy/Compat)
         let mut hc2 = HostConfig::default();
         hc2.nano_cpus = None; // clear nano
         hc2.cpu_quota = Some(50000);
@@ -449,7 +426,6 @@ mod tests {
         let limits2 = details2.limits.expect("Should have limits");
         assert_eq!(limits2.cpu_limit, Some(0.5));
 
-        // Case 3: No limits
         let mut hc3 = HostConfig::default();
         hc3.nano_cpus = None;
         hc3.cpu_quota = None;
@@ -470,7 +446,6 @@ mod tests {
     fn test_include_stopped_logic() {
         // Validate the boolean logic we implemented in list_containers
         // logic: !req.include_stopped && !has_explicit_state_filter
-        
         let check_filter = |include_stopped: bool, state_filter: Option<i32>| -> bool {
              let has_explicit_state_filter = state_filter.map_or(false, |sf| {
                  let enum_val = ContainerStateFilter::try_from(sf).unwrap_or(ContainerStateFilter::Unspecified);
@@ -484,7 +459,7 @@ mod tests {
         assert_eq!(check_filter(false, None), true);
 
         // User asks for "Exited": Don't include stopped (default), but Explicit Filter -> Should NOT Filter (Return False to keep all)
-        // (Because apply_state_filter handles the reduction to just "axited" later/earlier)
+        // (Because apply_state_filter handles the reduction to just "exited" later/earlier)
         assert_eq!(check_filter(false, Some(ContainerStateFilter::Exited as i32)), false);
 
         // User asks for "Running": Don't include stopped, Explicit Filter -> Should NOT Filter (Return False)

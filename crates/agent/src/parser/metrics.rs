@@ -1,10 +1,6 @@
 use std::sync::atomic::{AtomicU64, AtomicI64, Ordering};
 use serde::Serialize;
 
-/// Error categories for metrics recording.
-/// 
-/// This enum provides type-safe error classification, preventing typos
-/// and eliminating string comparison overhead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricErrorType {
     /// Parse operation exceeded time limit
@@ -19,23 +15,11 @@ pub enum MetricErrorType {
     Other,
 }
 
-/// A wrapper that forces the wrapped data onto its own cache line(s).
-/// 
-/// Uses `#[repr(align(64))]` to guarantee that each instance starts on
-/// a 64-byte boundary (typical CPU cache line size). This prevents false
-/// sharing where multiple CPU cores invalidate each other's L1 cache when
-/// updating different metrics.
-/// 
-/// # Why 64 bytes?
-/// 
-/// Most modern CPUs use 64-byte cache lines (x86-64, ARM64). Some older
-/// or specialized CPUs use 32 or 128 bytes, but 64 is the most common
-/// and provides good performance across all platforms.
+/// wrapper that forces the wrapped data onto its own cache line(s).
 #[repr(align(64))]
 #[derive(Debug, Default)]
 pub struct CacheAligned<T>(pub T);
 
-/// Detection metrics (format detection attempts and outcomes)
 #[derive(Debug, Default)]
 pub struct DetectionMetrics {
     pub attempts: AtomicU64,
@@ -43,7 +27,6 @@ pub struct DetectionMetrics {
     pub fallback: AtomicU64,
 }
 
-/// Format-specific parsing counters (hottest path - updated per log line)
 #[derive(Debug, Default)]
 pub struct FormatMetrics {
     pub json: AtomicU64,
@@ -53,14 +36,12 @@ pub struct FormatMetrics {
     pub plain: AtomicU64,
 }
 
-/// Performance totals (aggregate timing and counts)
 #[derive(Debug, Default)]
 pub struct TotalMetrics {
     pub time_nanos: AtomicU64,
     pub count: AtomicU64,
 }
 
-/// Error counters by type
 #[derive(Debug, Default)]
 pub struct ErrorMetrics {
     pub generic: AtomicU64,
@@ -70,70 +51,29 @@ pub struct ErrorMetrics {
     pub non_utf8: AtomicU64,
 }
 
-/// Gauge metrics (can go up or down - container tracking)
 #[derive(Debug, Default)]
 pub struct GaugeMetrics {
     pub active_containers: AtomicI64,
     pub disabled_containers: AtomicI64,
 }
 
-/// System health metrics (Docker connectivity, etc)
 #[derive(Debug, Default)]
 pub struct SystemMetrics {
-    /// Number of consecutive Docker API failures
     pub docker_consecutive_failures: AtomicU64,
 }
 
-/// Metrics for parsing operations.
-/// 
-/// # Architecture
-/// 
-/// This struct uses cache-line alignment via `CacheAligned<T>` wrapper to prevent
-/// false sharing between hot counters. When multiple threads update different metric
-/// groups simultaneously, keeping them on separate cache lines (64 bytes) prevents
-/// CPU cores from invalidating each other's L1 cache.
-/// 
-/// Each metric group is wrapped in `CacheAligned<T>` which uses `#[repr(align(64))]`
-/// to guarantee proper alignment. This is superior to manual padding because:
-/// 
-/// 1. **Guaranteed Alignment**: The compiler ensures each group starts on a cache line
-/// 2. **No Manual Math**: Adding fields doesn't require recalculating padding bytes
-/// 3. **No Field Reordering**: Each group is atomic and won't be split by optimizer
-/// 4. **Future Proof**: Works correctly on CPUs with different cache line sizes
-/// 
-/// # Memory Ordering
-/// 
-/// All operations use `Ordering::Relaxed`. For observability metrics, we don't
-/// need strict consistency - eventual correctness is sufficient and much faster.
-/// 
-/// # Snapshot Consistency
-/// 
-/// Note that `snapshot()` reads are not atomic across all fields. There may be
-/// "tearing" where `total_lines_parsed` and `total_parse_time_nanos` are slightly
-/// out of sync. This is acceptable for metrics and avoids expensive synchronization.
-/// 
-/// # Performance
-/// 
-/// The `CacheAligned` wrapper adds ~256 bytes overhead (5 groups × ~50 bytes padding),
-/// but provides 2-3x speedup under high contention (4+ threads, >50K logs/sec).
 #[derive(Debug, Default)]
 pub struct ParsingMetrics {
-    /// Group 1: Detection metrics (format detection attempts)
     pub detection: CacheAligned<DetectionMetrics>,
     
-    /// Group 2: Format counters (HOTTEST PATH - updated per log line)
     pub formats: CacheAligned<FormatMetrics>,
     
-    /// Group 3: Performance totals (aggregate timing)
     pub totals: CacheAligned<TotalMetrics>,
     
-    /// Group 4: Error counters (by error type)
     pub errors: CacheAligned<ErrorMetrics>,
     
-    /// Group 5: Gauges (up/down container tracking)
     pub gauges: CacheAligned<GaugeMetrics>,
 
-    /// Group 6: System health (Docker connectivity)
     pub system: CacheAligned<SystemMetrics>,
 }
 
@@ -142,7 +82,6 @@ impl ParsingMetrics {
         Self::default()
     }
 
-    /// Record a detection attempt
     #[inline]
     pub fn record_detection(&self, success: bool) {
         self.detection.0.attempts.fetch_add(1, Ordering::Relaxed);
@@ -153,19 +92,13 @@ impl ParsingMetrics {
         }
     }
 
-    /// Record a successful parse
-    /// 
-    /// This is the hottest path in the metrics system - called once per log line.
-    /// The `#[inline]` hint ensures zero function call overhead.
     #[inline]
     pub fn record_parse(&self, format: super::LogFormat, time_nanos: u64) {
         use super::LogFormat;
         
-        // Update totals first
         self.totals.0.count.fetch_add(1, Ordering::Relaxed);
         self.totals.0.time_nanos.fetch_add(time_nanos, Ordering::Relaxed);
         
-        // Update format-specific counter
         match format {
             LogFormat::Json => self.formats.0.json.fetch_add(1, Ordering::Relaxed),
             LogFormat::Logfmt => self.formats.0.logfmt.fetch_add(1, Ordering::Relaxed),
@@ -177,10 +110,6 @@ impl ParsingMetrics {
         };
     }
 
-    /// Record a parse error
-    /// 
-    /// Uses type-safe enum instead of strings to prevent typos and
-    /// eliminate string comparison overhead.
     #[inline]
     pub fn record_error(&self, error_type: MetricErrorType) {
         match error_type {
@@ -192,53 +121,33 @@ impl ParsingMetrics {
         };
     }
 
-    // --- Gauge Management ---
-    
-    /// Increment active containers with parsing enabled
+
     #[inline]
     pub fn inc_active_containers(&self) {
         self.gauges.0.active_containers.fetch_add(1, Ordering::Relaxed);
     }
     
-    /// Decrement active containers with parsing enabled
     #[inline]
     pub fn dec_active_containers(&self) {
         self.gauges.0.active_containers.fetch_sub(1, Ordering::Relaxed);
     }
     
-    /// Increment containers with parsing disabled
     #[inline]
     pub fn inc_disabled_containers(&self) {
         self.gauges.0.disabled_containers.fetch_add(1, Ordering::Relaxed);
     }
     
-    /// Decrement containers with parsing disabled
     #[inline]
     pub fn dec_disabled_containers(&self) {
         self.gauges.0.disabled_containers.fetch_sub(1, Ordering::Relaxed);
     }
 
-    // --- System Metrics ---
-
-    /// Set consecutive Docker API failures
+    
     #[inline]
     pub fn set_docker_failures(&self, count: u64) {
         self.system.0.docker_consecutive_failures.store(count, Ordering::Relaxed);
     }
     
-    // --- Snapshot Export ---
-    
-    /// Create a consistent snapshot of current metrics.
-    /// 
-    /// This is the preferred way to read metrics. It returns a serializable
-    /// struct suitable for HTTP endpoints, logging, or Prometheus export.
-    /// 
-    /// # Note on Consistency
-    /// 
-    /// Individual reads are atomic, but the snapshot as a whole is not transactional.
-    /// There may be slight inconsistencies (e.g., `total_parse_time_nanos` might include
-    /// a parse that hasn't yet incremented `total_lines_parsed`). This is acceptable
-    /// for observability metrics.
     pub fn snapshot(&self) -> MetricsSnapshot {
         let total_parsed = self.totals.0.count.load(Ordering::Relaxed);
         let total_time_ns = self.totals.0.time_nanos.load(Ordering::Relaxed);
@@ -294,22 +203,10 @@ impl ParsingMetrics {
     }
 }
 
-/// A read-only snapshot of parsing metrics.
-/// 
-/// This struct is cheap to clone and can be serialized to JSON for
-/// HTTP endpoints, logged for debugging, or exported to Prometheus.
-/// 
-/// # Example
-/// 
-/// ```rust
-/// let snapshot = metrics.snapshot();
-/// println!("Parsed {} lines at {:.2} μs/line", 
-///          snapshot.total_parsed, 
-///          snapshot.avg_parse_time_us);
-/// ```
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricsSnapshot {
-    // Detection metrics
+    // Detection
     pub detection_attempts: u64,
     pub detection_success: u64,
     pub detection_fallback: u64,
@@ -342,32 +239,24 @@ pub struct MetricsSnapshot {
 }
 
 impl MetricsSnapshot {
-    /// Convert snapshot to a HashMap for gRPC metadata
-    /// 
-    /// This is used by the health service to include metrics in health check responses.
-    /// Only the most important metrics are included to keep the metadata lightweight.
+    
     pub fn to_metadata_map(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         
-        // Core metrics
         map.insert("total_parsed".to_string(), self.total_parsed.to_string());
         map.insert("success_rate".to_string(), format!("{:.2}", self.success_rate));
         map.insert("avg_parse_time_us".to_string(), format!("{:.2}", self.avg_parse_time_us));
         
-        // Error counts
         map.insert("parse_errors".to_string(), self.parse_errors.to_string());
         map.insert("parse_timeouts".to_string(), self.parse_timeouts.to_string());
         map.insert("parse_panics".to_string(), self.parse_panics.to_string());
         
-        // System Health
         map.insert("docker_failures".to_string(), self.docker_consecutive_failures.to_string());
 
-        // Format breakdown
         map.insert("json_parsed".to_string(), self.json_parsed.to_string());
         map.insert("logfmt_parsed".to_string(), self.logfmt_parsed.to_string());
         map.insert("plain_parsed".to_string(), self.plain_parsed.to_string());
         
-        // Container tracking
         map.insert("active_containers".to_string(), self.active_containers.to_string());
         map.insert("disabled_containers".to_string(), self.disabled_containers.to_string());
         
@@ -407,9 +296,7 @@ mod tests {
     fn test_record_parse_counts_and_times() {
         let metrics = ParsingMetrics::new();
         
-        // 1. JSON parse: 1000ns
         metrics.record_parse(crate::parser::LogFormat::Json, 1000);
-        // 2. Logfmt parse: 2000ns
         metrics.record_parse(crate::parser::LogFormat::Logfmt, 2000);
         
         let snap = metrics.snapshot();
@@ -417,7 +304,6 @@ mod tests {
         assert_eq!(snap.json_parsed, 1);
         assert_eq!(snap.logfmt_parsed, 1);
         
-        // Total time = 3000ns, Avg = 1500ns = 1.5us
         assert!((snap.avg_parse_time_us - 1.5).abs() < f64::EPSILON);
     }
 
@@ -425,11 +311,9 @@ mod tests {
     fn test_error_recording_and_success_rate() {
         let metrics = ParsingMetrics::new();
         
-        // 2 successes
         metrics.record_parse(crate::parser::LogFormat::Json, 100);
         metrics.record_parse(crate::parser::LogFormat::Json, 100);
         
-        // 2 errors
         metrics.record_error(MetricErrorType::Timeout);
         metrics.record_error(MetricErrorType::NonUtf8);
         
@@ -439,8 +323,6 @@ mod tests {
         assert_eq!(snap.parse_timeouts, 1);
         assert_eq!(snap.non_utf8_content, 1);
         
-        // Total attempts = 2 successes + 2 errors = 4
-        // Success rate = 2 / 4 = 0.5
         assert_eq!(snap.success_rate, 0.5);
     }
 

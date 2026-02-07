@@ -2,8 +2,6 @@ use super::traits::*;
 use super::formats::*;
 
 /// Format detector orchestrator with adaptive sampling
-/// 
-/// Implements a multi-stage detection strategy:
 /// 1. Quick detection on first line (fast path)
 /// 2. Multi-line sampling if confidence is low
 /// 3. Adaptive refinement for uncertain cases
@@ -12,7 +10,6 @@ pub struct FormatDetectorOrchestrator {
 }
 
 impl FormatDetectorOrchestrator {
-    /// Create a new orchestrator with all detectors
     pub fn new() -> Self {
         let detectors: Vec<Box<dyn FormatDetector>> = vec![
             // Order matters! More specific detectors first
@@ -26,70 +23,50 @@ impl FormatDetectorOrchestrator {
         Self { detectors }
     }
 
-    /// Detect format from a single line (fast path)
     pub fn detect_single(&self, sample: &[u8]) -> DetectionResult {
         self.run_detectors(sample)
     }
 
-    /// Detect format with multi-line sampling (more accurate)
     pub fn detect_multi(&self, samples: &[&[u8]]) -> DetectionResult {
         if samples.is_empty() {
             return DetectionResult::new(LogFormat::PlainText, 0.1);
         }
 
-        // Run detection on each sample
         let results: Vec<DetectionResult> = samples
             .iter()
             .map(|sample| self.run_detectors(sample))
             .collect();
 
-        // Use majority voting
         self.majority_vote(results)
     }
 
-    /// Adaptive detection: start fast, refine if uncertain
     pub fn detect_adaptive(&self, samples: &[&[u8]]) -> DetectionResult {
         if samples.is_empty() {
             return DetectionResult::new(LogFormat::PlainText, 0.1);
         }
 
-        // Stage 1: Quick detection on first few lines
         let initial_sample_size = samples.len().min(super::DETECTION_SAMPLE_SIZE);
         let initial_samples = &samples[..initial_sample_size];
         let initial_result = self.detect_multi(initial_samples);
 
-        // Optimization: If we found a structured format with high confidence, trust it.
-        // We generally don't trust "High Confidence PlainText" early on, because it might just be a header.
         if initial_result.is_high_confidence() && initial_result.format != LogFormat::PlainText {
             return initial_result;
         }
 
-        // Stage 2: Refinement
-        // If we have more data and the result is either:
-        // 1. Not high confidence
-        // 2. High confidence BUT it's PlainText (checking for "Banner/Header" scenario)
+    
         if samples.len() > initial_sample_size {
             let refinement_size = samples.len().min(super::ADAPTIVE_REFINEMENT_SIZE);
             let refinement_samples = &samples[..refinement_size];
             let refined_result = self.detect_multi(refinement_samples);
 
-            // If the refined pass found a structured log (not PlainText), prefer it
-            // because it is based on a larger sample size.
-            // This handles:
-            // 1. PlainText -> Structured (found structure deep in unrelated header)
-            // 2. Structured A -> Structured B (corrected format based on more data)
-            // 3. Structured A -> Structured A (refined confidence)
             if refined_result.format != LogFormat::PlainText && refined_result.format != LogFormat::Unknown {
                 return refined_result;
             }
-            
-            // If refined result is PlainText/Unknown, but initial was Structured, keep initial.
-            // This protects against "good start, bad tail" where we want to keep the parser.
+        
             if initial_result.format != LogFormat::PlainText && initial_result.format != LogFormat::Unknown {
                 return initial_result;
             }
 
-            // If both are PlainText, take the one with higher confidence (or refined if equal)
             if refined_result.confidence >= initial_result.confidence {
                 return refined_result;
             }
@@ -98,17 +75,14 @@ impl FormatDetectorOrchestrator {
         initial_result
     }
 
-    /// Run all detectors and return the best match
     fn run_detectors(&self, sample: &[u8]) -> DetectionResult {
         let mut best_result = DetectionResult::no_match();
 
         for detector in &self.detectors {
             let result = detector.detect(sample);
             
-            // Keep the result with highest confidence
             if result.confidence > best_result.confidence {
                 best_result = result;
-                // Optimization: Early exit if we are certain
                 if best_result.confidence >= 0.99 {
                     break;
                 }
@@ -118,7 +92,6 @@ impl FormatDetectorOrchestrator {
         best_result
     }
 
-    /// Majority voting across multiple samples
     fn majority_vote(&self, results: Vec<DetectionResult>) -> DetectionResult {
         use std::collections::HashMap;
 
@@ -128,7 +101,6 @@ impl FormatDetectorOrchestrator {
 
         let total_results = results.len();
         
-        // Count votes for each format
         let mut votes: HashMap<LogFormat, Vec<f32>> = HashMap::new();
         for result in results {
             votes.entry(result.format)
@@ -136,12 +108,10 @@ impl FormatDetectorOrchestrator {
                 .push(result.confidence);
         }
 
-        // Find format with most votes and highest average confidence
         let mut best_format = LogFormat::PlainText;
         let mut best_score = 0.0f32;
 
-        // Iterate deterministically over formats to ensure stable tests
-        // (HashMap iteration order is random)
+
         let mut formats: Vec<_> = votes.keys().cloned().collect();
         formats.sort();
 
@@ -150,7 +120,6 @@ impl FormatDetectorOrchestrator {
                 let avg_confidence: f32 = confidences.iter().sum::<f32>() / confidences.len() as f32;
                 let vote_count = confidences.len();
                 
-                // Score = (vote_count / total_votes) * avg_confidence
                 let score = (vote_count as f32 / total_results as f32) * avg_confidence;
 
                 if score > best_score {
@@ -160,7 +129,6 @@ impl FormatDetectorOrchestrator {
             }
         }
 
-        // Get average confidence for the winning format
         let avg_confidence = votes.get(&best_format)
             .map(|c| c.iter().sum::<f32>() / c.len() as f32)
             .unwrap_or(0.1);
@@ -232,14 +200,12 @@ mod tests {
         ];
         
         let result = orchestrator.detect_multi(&samples);
-        // Should detect JSON (2 out of 3)
         assert_eq!(result.format, LogFormat::Json);
     }
 
     #[test]
     fn test_adaptive_detection_high_confidence() {
         let orchestrator = FormatDetectorOrchestrator::new();
-        // Use richer JSON with timestamp and logger to reach 0.95+ confidence
         let samples: Vec<&[u8]> = vec![
             br#"{"level":"info","msg":"line1","timestamp":1234567890,"logger":"app"}"#,
             br#"{"level":"info","msg":"line2","timestamp":1234567891,"logger":"app"}"#,
@@ -261,12 +227,10 @@ mod tests {
             b"  | |  | | \\ \\ / / ",
             b"  | |__| |  \\ V /  ",
             b"Starting application...", // Plain text
-            br#"{"level":"info","msg":"System initialized"}"#, // Real log!
+            br#"{"level":"info","msg":"System initialized"}"#, // Real log
             br#"{"level":"info","msg":"Listening on 8080"}"#,
         ];
         
-        // The old logic would see lines 1-3 as PlainText and return.
-        // The new logic should see PlainText, decide to look deeper, and find the JSON.
         let result = orchestrator.detect_adaptive(&samples);
         assert_eq!(result.format, LogFormat::Json);
     }
