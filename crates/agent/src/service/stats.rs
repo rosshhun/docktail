@@ -11,7 +11,6 @@ use super::proto::{
     BlockIoDeviceStats, CpuThrottlingStats,
 };
 
-/// Implementation of the StatsService gRPC service
 /// Provides real-time container resource statistics
 pub struct StatsServiceImpl {
     state: SharedState,
@@ -49,7 +48,6 @@ impl StatsServiceImpl {
     }
 
     /// Convert bollard ContainerStatsResponse to protobuf ContainerStatsResponse
-    /// Pure function - no instance state needed
     fn convert_stats(container_id: &str, stats: bollard::models::ContainerStatsResponse) -> ContainerStatsResponse {
         // Prefer Docker's own measurement timestamp; fall back to wall clock.
         // BollardDate is a String (RFC 3339) when no chrono/time feature is enabled.
@@ -104,7 +102,6 @@ impl StatsServiceImpl {
             }
         };
 
-        // Memory stats with proper Option handling
         let memory_stats = if let Some(ref mem_stats) = stats.memory_stats {
             let memory_usage = mem_stats.usage.unwrap_or(0);
             let memory_limit = mem_stats.limit.unwrap_or(0);
@@ -152,7 +149,6 @@ impl StatsServiceImpl {
             }
         };
 
-        // Network stats with proper Option handling
         let network_stats = stats.networks.map(|networks| {
             networks.into_iter().map(|(interface_name, net)| NetworkStats {
                 interface_name,
@@ -167,7 +163,6 @@ impl StatsServiceImpl {
             }).collect()
         }).unwrap_or_default();
 
-        // Block I/O stats with proper Option handling
         let block_io_stats = if let Some(ref blkio_stats) = stats.blkio_stats {
             let mut read_bytes = 0u64;
             let mut write_bytes = 0u64;
@@ -235,7 +230,7 @@ impl StatsServiceImpl {
             }
         };
 
-        // PIDs count
+
         let pids_count = stats.pids_stats
             .and_then(|p| p.current);
 
@@ -256,8 +251,6 @@ impl StatsServiceImpl {
     /// NOTE: In one-shot mode (stream=false), Docker may return identical
     /// `cpu_stats` and `precpu_stats`, producing a 0% reading.  This is a
     /// Docker API limitation – streaming mode returns accurate deltas.
-    ///
-    /// Pure function - no instance state needed
     fn calculate_cpu_percentage(stats: &bollard::models::ContainerStatsResponse) -> f64 {
         let cpu_stats = match &stats.cpu_stats {
             Some(cpu) => cpu,
@@ -372,12 +365,10 @@ mod tests {
     };
     use std::collections::HashMap as StdHashMap;
 
-    /// Helper: build a minimal bollard stats response with all fields None
     fn empty_bollard_stats() -> BollardStatsResponse {
         BollardStatsResponse::default()
     }
 
-    /// Helper: build a bollard stats response with realistic CPU data
     fn bollard_stats_with_cpu(
         cpu_total: u64,
         precpu_total: u64,
@@ -412,7 +403,6 @@ mod tests {
         }
     }
 
-    // ---- calculate_cpu_percentage tests ----
 
     #[test]
     fn cpu_percentage_normal_case() {

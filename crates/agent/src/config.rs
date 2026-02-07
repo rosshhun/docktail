@@ -7,7 +7,6 @@ use rustls::ServerConfig;
 use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 
-/// Main agent configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
@@ -22,7 +21,6 @@ pub struct AgentConfig {
     pub inventory_sync_interval_secs: u64,
 }
 
-/// Multiline log grouping configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MultilineConfig {

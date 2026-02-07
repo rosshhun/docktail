@@ -1,5 +1,4 @@
-// Allow dead code in modules with future-facing types (detectors, error variants, metrics helpers)
-#![allow(dead_code)]
+// #![allow(dead_code)]
 
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -18,7 +17,6 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod service;
 mod docker;
 mod filter;
-mod health;
 mod config;
 mod state;
 mod parser;
@@ -126,7 +124,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let health_service = HealthServiceImpl::new(Arc::clone(&state.metrics));
     let stats_service = StatsServiceImpl::new(Arc::clone(&state));
 
-    // Parse bind address
     let addr: SocketAddr = config.bind_address.parse()
         .map_err(|e| {
             error!("Invalid bind address: {}", e);
@@ -135,7 +132,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("gRPC server will bind to: {}", addr);
 
-    // Validate and load TLS certificates
     config.validate()
         .map_err(|e| {
             error!("TLS certificate validation failed: {}", e);
@@ -153,10 +149,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✓ TLS certificates loaded successfully");
     info!("✓ mTLS enabled - client certificates required");
     
-    // Create TLS acceptor
+
     let tls_acceptor = TlsAcceptor::from(rustls_config);
     
-    // Create TCP listener
     let listener = TcpListener::bind(addr).await?;
     
     info!("✓ Registered LogService");
@@ -172,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("========================================");
     info!("");
 
-    // Start server with mTLS
+
     let incoming = TcpListenerStream::new(listener)
         .then(move |result| {
             let tls_acceptor = tls_acceptor.clone();

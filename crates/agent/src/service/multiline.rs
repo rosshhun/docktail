@@ -298,35 +298,33 @@ fn is_continuation_line(
     previous_level: i32,
     require_error_anchor: bool,
 ) -> Option<ContinuationPattern> {
-    // Empty lines are never continuations
+
     if current.is_empty() {
         return None;
     }
 
-    // 1. Stack frame patterns (high confidence, always group)
-    //    Indented "at" — standard in Java, Node, .NET, Rust backtraces
     if starts_with_any(current, &[b"   at ", b"\tat ", b"\t at "]) {
         return Some(ContinuationPattern::StackFrame);
     }
-    // Chained exception headers
+
     if starts_with_any(current, &[b"Caused by:", b"caused by:", b"due to:", b"Suppressed:"]) {
         return Some(ContinuationPattern::StackFrame);
     }
-    // Python traceback patterns
+
     if starts_with_any(current, &[b"  File \"", b"    raise ", b"Traceback "]) {
         return Some(ContinuationPattern::StackFrame);
     }
-    // Go panic patterns
+
     if starts_with_any(current, &[b"goroutine ", b"\tgoroutine "]) {
         if contains_any(previous, &[b"panic", b"runtime error"]) {
             return Some(ContinuationPattern::StackFrame);
         }
     }
-    // .NET stack trace pattern
+
     if starts_with_any(current, &[b"   --- ", b"   at System.", b"   at Microsoft."]) {
         return Some(ContinuationPattern::StackFrame);
     }
-    // Rust backtrace numbered frames: "   0: std::panic::..."
+
     if current.len() > 6 && current[0..3] == *b"   " {
         let rest = &current[3..];
         if rest.len() >= 3
@@ -337,11 +335,11 @@ fn is_continuation_line(
         }
     }
 
-    // 2. Indentation-based grouping
+
     let is_indented = current.starts_with(b"    ") || current.starts_with(b"\t");
     if is_indented {
         if require_error_anchor {
-            // Conservative mode: only group indented content after error-like lines
+
             let is_error_anchor = previous_level >= 4
                 || contains_any(
                     previous,
@@ -356,12 +354,10 @@ fn is_continuation_line(
                 return Some(ContinuationPattern::ErrorIndentation);
             }
         } else {
-            // Aggressive mode: group any indented content
             return Some(ContinuationPattern::ErrorIndentation);
         }
     }
 
-    // 3. Explicit continue tokens
     if starts_with_any(
         current,
         &[
@@ -375,10 +371,9 @@ fn is_continuation_line(
         return Some(ContinuationPattern::ContinueToken);
     }
 
-    None // Default: don't group
+    None
 }
 
-// ─── Helper functions ───────────────────────────────────────────
 
 fn starts_with_any(haystack: &[u8], needles: &[&[u8]]) -> bool {
     needles.iter().any(|n| haystack.starts_with(n))
@@ -573,8 +568,7 @@ fn skip_log_prefix(content: &[u8]) -> usize {
     }
 
     // Safety: if we consumed most of the line, it probably wasn't prefix.
-    // Use 5/6 threshold (~83%) to accommodate double-timestamp prefixes
-    // which can be very long (e.g. "2026-02-05T10:00:00Z 2026-02-05 10:00:00.123 ERROR boom").
+    // e.g. "2026-02-05T10:00:00Z 2026-02-05 10:00:00.123 ERROR boom"
     if len > 10 && pos > len * 5 / 6 {
         return 0;
     }
@@ -594,15 +588,12 @@ fn has_log_level_prefix(content: &[u8]) -> bool {
         b"E ", b"W ", b"I ", // Single-letter levels (Go zap, etc.)
     ];
 
-    // Check at byte 0 first (fast path — no prefix)
     if check_level_at(content, 0, levels) {
         return true;
     }
 
-    // Skip past timestamps/brackets/prefixes and check again
     let offset = skip_log_prefix(content);
     if offset > 0 && offset < content.len() {
-        // Check for bracketed level: [ERROR], [WARN], etc.
         if content[offset] == b'[' {
             let after_bracket = offset + 1;
             if after_bracket < content.len() && check_level_at(content, after_bracket, levels) {
@@ -636,7 +627,6 @@ fn check_level_at(content: &[u8], pos: usize, levels: &[&[u8]]) -> bool {
     false
 }
 
-// ─── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
