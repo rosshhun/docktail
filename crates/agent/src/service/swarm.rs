@@ -275,7 +275,14 @@ impl SwarmService for SwarmServiceImpl {
             }
             Err(e) => {
                 warn!(service_id = %service_id, "Failed to inspect service: {}", e);
-                Err(Status::not_found(format!("Service not found: {}", service_id)))
+                let msg = e.to_string();
+                if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                    Err(Status::not_found(format!("Service not found: {}", service_id)))
+                } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
+                    Err(Status::permission_denied(format!("Permission denied inspecting service: {}", e)))
+                } else {
+                    Err(Status::internal(format!("Failed to inspect service: {}", e)))
+                }
             }
         }
     }
@@ -365,7 +372,16 @@ impl SwarmService for SwarmServiceImpl {
 
         // First, resolve service name for SwarmContext enrichment
         let service = self.state.docker.inspect_service(&service_id).await
-            .map_err(|e| Status::not_found(format!("Service not found: {}", e)))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                    Status::not_found(format!("Service not found: {}", e))
+                } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
+                    Status::permission_denied(format!("Permission denied: {}", e))
+                } else {
+                    Status::internal(format!("Failed to inspect service: {}", e))
+                }
+            })?;
         let service_name = service.spec.as_ref()
             .and_then(|s| s.name.clone())
             .unwrap_or_else(|| service_id.clone());
@@ -411,52 +427,99 @@ impl SwarmService for SwarmServiceImpl {
                         bollard::container::LogOutput::Console { message } => (LogLevel::Stdout, message),
                     };
 
-                    // Parse Docker timestamp from the log line
-                    let split_idx = raw_bytes.iter().position(|&b| b == b' ');
-                    let (timestamp, content) = match split_idx {
-                        Some(idx) => {
-                            match std::str::from_utf8(&raw_bytes[..idx]) {
-                                Ok(ts_str) => {
-                                    match chrono::DateTime::parse_from_rfc3339(ts_str) {
-                                        Ok(dt) => {
-                                            let ts = dt.timestamp_nanos_opt().unwrap_or(0);
-                                            let msg_start = idx + 1;
-                                            let content = if msg_start < raw_bytes.len() {
-                                                raw_bytes.slice(msg_start..)
-                                            } else {
-                                                bytes::Bytes::new()
-                                            };
-                                            (ts, content)
-                                        }
-                                        Err(_) => (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), raw_bytes.clone()),
-                                    }
-                                }
-                                Err(_) => (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), raw_bytes.clone()),
-                            }
-                        }
-                        None => (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), raw_bytes.clone()),
+                    // Docker service logs format:
+                    //   "service.slot.taskid@nodeid    | <timestamp> <message>"
+                    // First, try to split off the task prefix at " | ".
+                    let raw_str = std::str::from_utf8(&raw_bytes).unwrap_or("");
+                    let (task_prefix, after_prefix) = if let Some(pipe_idx) = raw_str.find(" | ") {
+                        (Some(&raw_str[..pipe_idx]), &raw_str[pipe_idx + 3..])
+                    } else {
+                        (None, raw_str)
                     };
 
-                    // Try to extract task context from the content.
-                    // Docker service logs prefix: "service_name.slot.task_id@node_id" 
-                    // but bollard may or may not include this prefix depending on version.
-                    // We fall back to the first matching task if we can't parse it.
-                    let swarm_ctx = if !service_tasks.is_empty() {
-                        let first_task = &service_tasks[0];
+                    // Parse timestamp from the remainder (after prefix)
+                    let (timestamp, message_str) = {
+                        let first_space = after_prefix.find(' ');
+                        match first_space {
+                            Some(idx) => {
+                                match chrono::DateTime::parse_from_rfc3339(&after_prefix[..idx]) {
+                                    Ok(dt) => (
+                                        dt.timestamp_nanos_opt().unwrap_or(0),
+                                        &after_prefix[idx + 1..],
+                                    ),
+                                    Err(_) => (
+                                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                                        after_prefix,
+                                    ),
+                                }
+                            }
+                            None => (
+                                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                                after_prefix,
+                            ),
+                        }
+                    };
+                    let content = bytes::Bytes::from(message_str.as_bytes().to_vec());
+
+                    // Extract per-line task context from the prefix.
+                    // Prefix format: "service_name.slot.task_id@node_id"
+                    // e.g. "myapp.1.abc123def456@node1"
+                    let swarm_ctx = {
+                        let mut ctx_task_id = String::new();
+                        let mut ctx_slot: u64 = 0;
+                        let mut ctx_node_id = String::new();
+
+                        if let Some(prefix) = task_prefix {
+                            let trimmed = prefix.trim();
+                            // Split at '@' to separate task part from node_id
+                            if let Some(at_idx) = trimmed.rfind('@') {
+                                ctx_node_id = trimmed[at_idx + 1..].to_string();
+                                let task_part = &trimmed[..at_idx];
+                                // task_part = "service_name.slot.task_id"
+                                // Split from the right: last segment = task_id,
+                                // second-to-last = slot, rest = service_name
+                                let segments: Vec<&str> = task_part.splitn(3, '.').collect();
+                                if segments.len() >= 3 {
+                                    // segments = ["service_name", "slot", "task_id"]
+                                    ctx_slot = segments[1].parse::<u64>().unwrap_or(0);
+                                    ctx_task_id = segments[2].to_string();
+                                } else if segments.len() == 2 {
+                                    ctx_slot = segments[0].parse::<u64>().unwrap_or(0);
+                                    ctx_task_id = segments[1].to_string();
+                                }
+                            }
+                        }
+
+                        // If prefix parsing didn't yield a task_id, fall back
+                        // to looking up the task from the pre-fetched task list
+                        // by matching slot or just using the first task.
+                        if ctx_task_id.is_empty() && !service_tasks.is_empty() {
+                            if ctx_slot > 0 {
+                                if let Some(t) = service_tasks.iter().find(|t| t.slot == Some(ctx_slot as i64)) {
+                                    ctx_task_id = t.id.clone().unwrap_or_default();
+                                    if ctx_node_id.is_empty() {
+                                        ctx_node_id = t.node_id.clone().unwrap_or_default();
+                                    }
+                                }
+                            }
+                            if ctx_task_id.is_empty() {
+                                let first_task = &service_tasks[0];
+                                ctx_task_id = first_task.id.clone().unwrap_or_default();
+                                if ctx_slot == 0 {
+                                    ctx_slot = first_task.slot.unwrap_or(0) as u64;
+                                }
+                                if ctx_node_id.is_empty() {
+                                    ctx_node_id = first_task.node_id.clone().unwrap_or_default();
+                                }
+                            }
+                        }
+
                         Some(SwarmContext {
                             service_id: service_id_clone.clone(),
                             service_name: service_name_clone.clone(),
-                            task_id: first_task.id.clone().unwrap_or_default(),
-                            task_slot: first_task.slot.unwrap_or(0) as u64,
-                            node_id: first_task.node_id.clone().unwrap_or_default(),
-                        })
-                    } else {
-                        Some(SwarmContext {
-                            service_id: service_id_clone.clone(),
-                            service_name: service_name_clone.clone(),
-                            task_id: String::new(),
-                            task_slot: 0,
-                            node_id: String::new(),
+                            task_id: ctx_task_id,
+                            task_slot: ctx_slot,
+                            node_id: ctx_node_id,
                         })
                     };
 
@@ -810,7 +873,16 @@ impl SwarmService for SwarmServiceImpl {
 
         // Inspect current service to get version and spec
         let current = self.state.docker.inspect_service(&service_id).await
-            .map_err(|e| Status::not_found(format!("Service not found: {}", e)))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                    Status::not_found(format!("Service not found: {}", e))
+                } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
+                    Status::permission_denied(format!("Permission denied: {}", e))
+                } else {
+                    Status::internal(format!("Failed to inspect service: {}", e))
+                }
+            })?;
 
         let version = current.version.as_ref()
             .and_then(|v| v.index)
@@ -1292,7 +1364,13 @@ impl SwarmService for SwarmServiceImpl {
         debug!("Listing swarm secrets (metadata only)");
 
         let secrets = self.state.docker.list_secrets().await
-            .map_err(|e| Status::internal(format!("Failed to list secrets: {}", e)))?;
+            .map_err(|e| {
+                if matches!(e, crate::docker::client::DockerError::NotSwarmManager) {
+                    Status::permission_denied(format!("{}", e))
+                } else {
+                    Status::internal(format!("Failed to list secrets: {}", e))
+                }
+            })?;
 
         let secret_infos: Vec<SwarmSecretInfo> = secrets.iter().map(|s| {
             let spec = s.spec.as_ref();
@@ -1328,7 +1406,13 @@ impl SwarmService for SwarmServiceImpl {
         debug!("Listing swarm configs (metadata only)");
 
         let configs = self.state.docker.list_configs().await
-            .map_err(|e| Status::internal(format!("Failed to list configs: {}", e)))?;
+            .map_err(|e| {
+                if matches!(e, crate::docker::client::DockerError::NotSwarmManager) {
+                    Status::permission_denied(format!("{}", e))
+                } else {
+                    Status::internal(format!("Failed to list configs: {}", e))
+                }
+            })?;
 
         let config_infos: Vec<SwarmConfigInfo> = configs.iter().map(|c| {
             let spec = c.spec.as_ref();
@@ -1662,7 +1746,10 @@ impl SwarmService for SwarmServiceImpl {
         request: Request<ServiceEventStreamRequest>,
     ) -> Result<Response<Self::ServiceEventStreamStream>, Status> {
         let req = request.into_inner();
-        let service_id = req.service_id.clone();
+        let service_id = req.service_id.trim().to_string();
+        if service_id.is_empty() {
+            return Err(Status::invalid_argument("service_id must not be empty"));
+        }
         let poll_ms = if req.poll_interval_ms == 0 { 2000 } else { req.poll_interval_ms };
         let state = self.state.clone();
 
@@ -1733,7 +1820,12 @@ impl SwarmService for SwarmServiceImpl {
 
                 let svc = match services.iter().find(|s| s.id.as_deref() == Some(&service_id)) {
                     Some(s) => s,
-                    None => continue,
+                    None => {
+                        // Service not found — may have been deleted. Emit a final
+                        // message and terminate instead of idling silently forever.
+                        Err(Status::not_found(format!("Service {} no longer exists", service_id)))?;
+                        unreachable!()
+                    }
                 };
 
                 let spec = svc.spec.as_ref();
@@ -2971,10 +3063,11 @@ impl SwarmService for SwarmServiceImpl {
         let mut created_volume_names = Vec::new();
         let mut failed_services = Vec::new();
 
-        // If no top-level "networks:" key, create an implicit default network
-        // (matches docker-compose / docker stack deploy behavior).
-        let has_explicit_networks = compose.get("networks").and_then(|n| n.as_mapping()).map(|m| !m.is_empty()).unwrap_or(false);
-        if !has_explicit_networks {
+        // Always create the implicit _default overlay network.
+        // Even when explicit top-level networks exist, services that omit
+        // `networks:` are attached to `<stack>_default` (matches docker stack
+        // deploy / docker-compose behavior).
+        {
             let default_net = format!("{}_default", req.stack_name);
             let mut labels = std::collections::HashMap::new();
             labels.insert("com.docker.stack.namespace".to_string(), req.stack_name.clone());
@@ -2997,10 +3090,38 @@ impl SwarmService for SwarmServiceImpl {
             }
         }
 
+        // Track which network aliases are external → their actual Docker network name
+        let mut external_networks: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
         // Create networks first
         if let Some(networks) = compose.get("networks").and_then(|n| n.as_mapping()) {
             for (name, config) in networks {
-                let net_name = format!("{}_{}", req.stack_name, name.as_str().unwrap_or("default"));
+                let raw_name = name.as_str().unwrap_or("default");
+
+                // Check for external: true
+                let is_external = config.get("external")
+                    .map(|v| {
+                        // external: true  OR  external: { name: "foo" }
+                        v.as_bool().unwrap_or(false) || v.is_mapping()
+                    })
+                    .unwrap_or(false);
+
+                if is_external {
+                    // External network: use as-is (or the explicit name if provided)
+                    let ext_name = config.get("external")
+                        .and_then(|v| v.as_mapping())
+                        .and_then(|m| m.get(serde_yaml::Value::String("name".into())))
+                        .and_then(|v| v.as_str())
+                        // Compose v3.5+: top-level `name:` key
+                        .or_else(|| config.get("name").and_then(|v| v.as_str()))
+                        .unwrap_or(raw_name);
+                    external_networks.insert(raw_name.to_string(), ext_name.to_string());
+                    created_network_names.push(ext_name.to_string());
+                    info!(network = %ext_name, alias = %raw_name, "External network — not creating, using as-is");
+                    continue;
+                }
+
+                let net_name = format!("{}_{}", req.stack_name, raw_name);
                 let driver = config.get("driver").and_then(|d| d.as_str()).unwrap_or("overlay");
                 let mut labels = std::collections::HashMap::new();
                 labels.insert("com.docker.stack.namespace".to_string(), req.stack_name.clone());
@@ -3027,10 +3148,35 @@ impl SwarmService for SwarmServiceImpl {
             }
         }
 
+        // Track which volume aliases are external → their actual Docker volume name
+        let mut external_volumes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
         // Create volumes
         if let Some(volumes) = compose.get("volumes").and_then(|v| v.as_mapping()) {
             for (name, config) in volumes {
-                let vol_name = format!("{}_{}", req.stack_name, name.as_str().unwrap_or("default"));
+                let raw_name = name.as_str().unwrap_or("default");
+
+                // Check for external: true
+                let is_external = config.get("external")
+                    .map(|v| v.as_bool().unwrap_or(false) || v.is_mapping())
+                    .unwrap_or(false);
+
+                if is_external {
+                    // External volume: use as-is (or the explicit name if provided)
+                    let ext_name = config.get("external")
+                        .and_then(|v| v.as_mapping())
+                        .and_then(|m| m.get(serde_yaml::Value::String("name".into())))
+                        .and_then(|v| v.as_str())
+                        // Compose v3.5+: top-level `name:` key
+                        .or_else(|| config.get("name").and_then(|v| v.as_str()))
+                        .unwrap_or(raw_name);
+                    external_volumes.insert(raw_name.to_string(), ext_name.to_string());
+                    created_volume_names.push(ext_name.to_string());
+                    info!(volume = %ext_name, alias = %raw_name, "External volume — not creating, using as-is");
+                    continue;
+                }
+
+                let vol_name = format!("{}_{}", req.stack_name, raw_name);
                 let driver = config.get("driver").and_then(|d| d.as_str());
                 let mut labels = std::collections::HashMap::new();
                 labels.insert("com.docker.stack.namespace".to_string(), req.stack_name.clone());
@@ -3100,43 +3246,91 @@ impl SwarmService for SwarmServiceImpl {
                     }
                 }
 
-                // Parse ports
+                // Parse ports (short string syntax and long/object syntax)
                 let mut port_configs = Vec::new();
                 if let Some(ports) = config.get("ports").and_then(|p| p.as_sequence()) {
                     for port in ports {
                         if let Some(port_str) = port.as_str() {
-                            // Parse "8080:80" or "80"
-                            let parts: Vec<&str> = port_str.split(':').collect();
-                            let (published, target) = if parts.len() >= 2 {
-                                (parts[0].parse::<i64>().unwrap_or(0), parts[parts.len()-1].split('/').next().unwrap_or("0").parse::<i64>().unwrap_or(0))
+                            // Short syntax: "80", "8080:80", "127.0.0.1:8080:80",
+                            // "8080:80/udp", "127.0.0.1:8080:80/udp"
+                            let (main, protocol) = if let Some(idx) = port_str.rfind('/') {
+                                (&port_str[..idx], &port_str[idx+1..])
                             } else {
-                                (0, parts[0].split('/').next().unwrap_or("0").parse::<i64>().unwrap_or(0))
+                                (port_str, "tcp")
                             };
-                            let protocol = if port_str.contains("/udp") {
-                                "udp"
-                            } else {
-                                "tcp"
+                            let parts: Vec<&str> = main.split(':').collect();
+                            let (published, target) = match parts.len() {
+                                1 => {
+                                    // "80" — target only, no published port
+                                    (0i64, parts[0].parse::<i64>().unwrap_or(0))
+                                }
+                                2 => {
+                                    // "8080:80" — published:target
+                                    (parts[0].parse::<i64>().unwrap_or(0), parts[1].parse::<i64>().unwrap_or(0))
+                                }
+                                3 => {
+                                    // "127.0.0.1:8080:80" — host_ip:published:target
+                                    // parts[0] is the IP (ignored for swarm ingress)
+                                    (parts[1].parse::<i64>().unwrap_or(0), parts[2].parse::<i64>().unwrap_or(0))
+                                }
+                                _ => (0, 0),
                             };
-                            port_configs.push(bollard::models::EndpointPortConfig {
-                                target_port: Some(target),
-                                published_port: if published > 0 { Some(published) } else { None },
-                                protocol: Some(match protocol {
-                                    "udp" => bollard::models::EndpointPortConfigProtocolEnum::UDP,
-                                    _ => bollard::models::EndpointPortConfigProtocolEnum::TCP,
-                                }),
-                                publish_mode: Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS),
-                                ..Default::default()
-                            });
+                            if target > 0 {
+                                port_configs.push(bollard::models::EndpointPortConfig {
+                                    target_port: Some(target),
+                                    published_port: if published > 0 { Some(published) } else { None },
+                                    protocol: Some(match protocol {
+                                        "udp" => bollard::models::EndpointPortConfigProtocolEnum::UDP,
+                                        _ => bollard::models::EndpointPortConfigProtocolEnum::TCP,
+                                    }),
+                                    publish_mode: Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS),
+                                    ..Default::default()
+                                });
+                            }
+                        } else if let Some(port_map) = port.as_mapping() {
+                            // Long/object syntax: { target: 80, published: 8080, protocol: udp, mode: host }
+                            let target = port_map.get(serde_yaml::Value::String("target".into()))
+                                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                                .unwrap_or(0) as i64;
+                            let published = port_map.get(serde_yaml::Value::String("published".into()))
+                                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                                .unwrap_or(0) as i64;
+                            let protocol = port_map.get(serde_yaml::Value::String("protocol".into()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("tcp");
+                            let mode = port_map.get(serde_yaml::Value::String("mode".into()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("ingress");
+                            if target > 0 {
+                                port_configs.push(bollard::models::EndpointPortConfig {
+                                    target_port: Some(target),
+                                    published_port: if published > 0 { Some(published) } else { None },
+                                    protocol: Some(match protocol {
+                                        "udp" => bollard::models::EndpointPortConfigProtocolEnum::UDP,
+                                        _ => bollard::models::EndpointPortConfigProtocolEnum::TCP,
+                                    }),
+                                    publish_mode: Some(match mode {
+                                        "host" => bollard::models::EndpointPortConfigPublishModeEnum::HOST,
+                                        _ => bollard::models::EndpointPortConfigPublishModeEnum::INGRESS,
+                                    }),
+                                    ..Default::default()
+                                });
+                            }
                         }
                     }
                 }
 
                 // Parse networks (sequence or mapping form)
+                // External networks are not stack-prefixed.
                 let networks: Option<Vec<bollard::models::NetworkAttachmentConfig>> = if let Some(net_val) = config.get("networks") {
                     if let Some(seq) = net_val.as_sequence() {
                         // Sequence form: networks: ["frontend", "backend"]
                         Some(seq.iter().filter_map(|n| n.as_str()).map(|n| {
-                            let net_name = format!("{}_{}", req.stack_name, n);
+                            let net_name = if let Some(ext) = external_networks.get(n) {
+                                ext.clone()
+                            } else {
+                                format!("{}_{}", req.stack_name, n)
+                            };
                             bollard::models::NetworkAttachmentConfig {
                                 target: Some(net_name),
                                 ..Default::default()
@@ -3145,7 +3339,11 @@ impl SwarmService for SwarmServiceImpl {
                     } else if let Some(map) = net_val.as_mapping() {
                         // Mapping form: networks: { frontend: { aliases: [...] } }
                         Some(map.keys().filter_map(|k| k.as_str()).map(|n| {
-                            let net_name = format!("{}_{}", req.stack_name, n);
+                            let net_name = if let Some(ext) = external_networks.get(n) {
+                                ext.clone()
+                            } else {
+                                format!("{}_{}", req.stack_name, n)
+                            };
                             bollard::models::NetworkAttachmentConfig {
                                 target: Some(net_name),
                                 ..Default::default()
@@ -3178,6 +3376,97 @@ impl SwarmService for SwarmServiceImpl {
                 labels.insert("com.docker.stack.namespace".to_string(), req.stack_name.clone());
                 labels.insert("com.docker.stack.image".to_string(), image.clone());
 
+                // Parse volumes / mounts (short and long/object syntax)
+                let mut mounts: Vec<bollard::models::Mount> = Vec::new();
+                if let Some(volumes) = config.get("volumes").and_then(|v| v.as_sequence()) {
+                    for vol in volumes {
+                        if let Some(vol_str) = vol.as_str() {
+                            // Short syntax: "volume_name:/container/path[:ro]"
+                            //               "/host/path:/container/path[:ro]"
+                            //               "/container/path"  (anonymous volume)
+                            let (main, read_only) = if vol_str.ends_with(":ro") {
+                                (&vol_str[..vol_str.len()-3], true)
+                            } else if vol_str.ends_with(":rw") {
+                                (&vol_str[..vol_str.len()-3], false)
+                            } else {
+                                (vol_str, false)
+                            };
+                            let parts: Vec<&str> = main.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                let source_raw = parts[0];
+                                let target = parts[1].to_string();
+                                // Determine mount type: absolute/relative path = bind, otherwise = volume
+                                let (typ, source) = if source_raw.starts_with('/') || source_raw.starts_with('.') {
+                                    (bollard::models::MountTypeEnum::BIND, source_raw.to_string())
+                                } else if let Some(ext) = external_volumes.get(source_raw) {
+                                    // External volume — use the real name without stack prefix
+                                    (bollard::models::MountTypeEnum::VOLUME, ext.clone())
+                                } else {
+                                    // Named volume — stack-prefix it to match created volumes
+                                    (bollard::models::MountTypeEnum::VOLUME, format!("{}_{}", req.stack_name, source_raw))
+                                };
+                                mounts.push(bollard::models::Mount {
+                                    target: Some(target),
+                                    source: Some(source),
+                                    typ: Some(typ),
+                                    read_only: Some(read_only),
+                                    ..Default::default()
+                                });
+                            } else {
+                                // Single path — anonymous volume
+                                mounts.push(bollard::models::Mount {
+                                    target: Some(parts[0].to_string()),
+                                    typ: Some(bollard::models::MountTypeEnum::VOLUME),
+                                    ..Default::default()
+                                });
+                            }
+                        } else if let Some(vol_map) = vol.as_mapping() {
+                            // Long/object syntax:
+                            // - type: volume|bind|tmpfs
+                            //   source: my_volume
+                            //   target: /container/path
+                            //   read_only: true
+                            let mount_type_str = vol_map.get(serde_yaml::Value::String("type".into()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("volume");
+                            let source_raw = vol_map.get(serde_yaml::Value::String("source".into()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let target = vol_map.get(serde_yaml::Value::String("target".into()))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let read_only = vol_map.get(serde_yaml::Value::String("read_only".into()))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+
+                            if !target.is_empty() {
+                                let typ = match mount_type_str {
+                                    "bind" => bollard::models::MountTypeEnum::BIND,
+                                    "tmpfs" => bollard::models::MountTypeEnum::TMPFS,
+                                    _ => bollard::models::MountTypeEnum::VOLUME,
+                                };
+                                // Stack-prefix named volume sources (not bind/tmpfs), unless external
+                                let source = if mount_type_str == "volume" && !source_raw.is_empty() && !source_raw.starts_with('/') {
+                                    if let Some(ext) = external_volumes.get(source_raw) {
+                                        ext.clone()
+                                    } else {
+                                        format!("{}_{}", req.stack_name, source_raw)
+                                    }
+                                } else {
+                                    source_raw.to_string()
+                                };
+                                mounts.push(bollard::models::Mount {
+                                    target: Some(target.to_string()),
+                                    source: if source.is_empty() { None } else { Some(source) },
+                                    typ: Some(typ),
+                                    read_only: Some(read_only),
+                                    ..Default::default()
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let spec = bollard::models::ServiceSpec {
                     name: Some(svc_name.clone()),
                     mode: Some(bollard::models::ServiceSpecMode {
@@ -3191,6 +3480,7 @@ impl SwarmService for SwarmServiceImpl {
                             image: Some(image),
                             env: if env_vec.is_empty() { None } else { Some(env_vec) },
                             command,
+                            mounts: if mounts.is_empty() { None } else { Some(mounts) },
                             ..Default::default()
                         }),
                         networks,

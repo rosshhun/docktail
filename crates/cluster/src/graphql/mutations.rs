@@ -429,24 +429,10 @@ async fn get_swarm_manager_client(
                 Ok(client)
             }
             None => {
-                // Fallback: any healthy agent (covers single-node or pre-health-check scenarios)
-                let fallback = agents.iter().find(|a| a.is_healthy());
-                match fallback {
-                    Some(agent) => {
-                        tracing::warn!(
-                            "No healthy manager agent found, falling back to agent '{}'",
-                            agent.info.id
-                        );
-                        let client = {
-                            let guard = agent.client.lock().await;
-                            guard.clone()
-                        };
-                        Ok(client)
-                    }
-                    None => Err(ApiError::Internal(
-                        "No healthy agents available. Cannot route swarm request.".to_string()
-                    ).extend()),
-                }
+                Err(ApiError::Internal(
+                    "No healthy swarm manager agent available. Ensure at least one \
+                     agent is connected to a swarm manager node and is healthy.".to_string()
+                ).extend())
             }
         }
     }

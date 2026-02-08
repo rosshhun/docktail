@@ -22,6 +22,8 @@ pub enum DockerError {
     StreamClosed,
     #[error("Unsupported log driver: {0}")]
     UnsupportedLogDriver(String),
+    #[error("This node is not a swarm manager. Swarm management operations require a manager node.")]
+    NotSwarmManager,
     #[error("Bollard error: {0}")]
     BollardError(#[from] bollard::errors::Error),
 }
@@ -508,23 +510,25 @@ impl DockerClient {
         }
     }
 
-    /// List all nodes in the swarm. Returns empty vec if not in swarm mode.
+    /// List all nodes in the swarm.
+    /// Returns `NotSwarmManager` if this node is a worker (503 from Docker).
     pub async fn list_nodes(&self) -> Result<Vec<bollard::models::Node>, DockerError> {
         match self.client.list_nodes(None::<bollard::query_parameters::ListNodesOptions>).await {
             Ok(nodes) => Ok(nodes),
             Err(bollard::errors::Error::DockerResponseServerError { status_code: 503, .. }) => {
-                Ok(Vec::new())
+                Err(DockerError::NotSwarmManager)
             }
             Err(e) => Err(DockerError::from(e)),
         }
     }
 
-    /// List all swarm services. Returns empty vec if not in swarm mode.
+    /// List all swarm services.
+    /// Returns `NotSwarmManager` if this node is a worker (503 from Docker).
     pub async fn list_services(&self) -> Result<Vec<bollard::models::Service>, DockerError> {
         match self.client.list_services(None::<bollard::query_parameters::ListServicesOptions>).await {
             Ok(services) => Ok(services),
             Err(bollard::errors::Error::DockerResponseServerError { status_code: 503, .. }) => {
-                Ok(Vec::new())
+                Err(DockerError::NotSwarmManager)
             }
             Err(e) => Err(DockerError::from(e)),
         }
@@ -539,33 +543,36 @@ impl DockerClient {
     }
 
     /// List tasks in the swarm with optional filters.
+    /// Returns `NotSwarmManager` if this node is a worker (503 from Docker).
     pub async fn list_tasks(&self) -> Result<Vec<bollard::models::Task>, DockerError> {
         match self.client.list_tasks(None::<bollard::query_parameters::ListTasksOptions>).await {
             Ok(tasks) => Ok(tasks),
             Err(bollard::errors::Error::DockerResponseServerError { status_code: 503, .. }) => {
-                Ok(Vec::new())
+                Err(DockerError::NotSwarmManager)
             }
             Err(e) => Err(DockerError::from(e)),
         }
     }
 
     /// List all swarm secrets (metadata only — actual secret data is never returned).
+    /// Returns `NotSwarmManager` if this node is a worker (503 from Docker).
     pub async fn list_secrets(&self) -> Result<Vec<bollard::models::Secret>, DockerError> {
         match self.client.list_secrets(None::<bollard::query_parameters::ListSecretsOptions>).await {
             Ok(secrets) => Ok(secrets),
             Err(bollard::errors::Error::DockerResponseServerError { status_code: 503, .. }) => {
-                Ok(Vec::new()) // Not in swarm mode
+                Err(DockerError::NotSwarmManager)
             }
             Err(e) => Err(DockerError::from(e)),
         }
     }
 
     /// List all swarm configs (metadata only — data content is omitted).
+    /// Returns `NotSwarmManager` if this node is a worker (503 from Docker).
     pub async fn list_configs(&self) -> Result<Vec<bollard::models::Config>, DockerError> {
         match self.client.list_configs(None::<bollard::query_parameters::ListConfigsOptions>).await {
             Ok(configs) => Ok(configs),
             Err(bollard::errors::Error::DockerResponseServerError { status_code: 503, .. }) => {
-                Ok(Vec::new()) // Not in swarm mode
+                Err(DockerError::NotSwarmManager)
             }
             Err(e) => Err(DockerError::from(e)),
         }
@@ -658,7 +665,10 @@ impl DockerClient {
             .create_service(spec, credentials)
             .await
             .map_err(DockerError::from)?;
-        Ok(result.id.unwrap_or_default())
+        result.id.filter(|id| !id.is_empty())
+            .ok_or_else(|| DockerError::ConnectionFailed(
+                "Docker returned success but did not provide a service ID".to_string()
+            ))
     }
 
     /// Delete a swarm service.
@@ -681,8 +691,13 @@ impl DockerClient {
     ) -> Result<(), DockerError> {
         use bollard::query_parameters::UpdateServiceOptions;
 
+        let version_i32 = i32::try_from(version).map_err(|_| {
+            DockerError::ConnectionFailed(format!(
+                "Service version index {} exceeds i32::MAX; cannot update via bollard", version
+            ))
+        })?;
         let opts = UpdateServiceOptions {
-            version: version as i32,
+            version: version_i32,
             ..Default::default()
         };
 
@@ -721,8 +736,13 @@ impl DockerClient {
 
         let spec = service.spec.unwrap_or_default();
 
+        let version_i32 = i32::try_from(version).map_err(|_| {
+            DockerError::ConnectionFailed(format!(
+                "Service version index {} exceeds i32::MAX; cannot rollback via bollard", version
+            ))
+        })?;
         let opts = UpdateServiceOptions {
-            version: version as i32,
+            version: version_i32,
             rollback: Some("previous".to_string()),
             ..Default::default()
         };

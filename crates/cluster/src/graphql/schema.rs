@@ -53,14 +53,10 @@ async fn resolve_swarm_agent(
         match manager {
             Some(agent) => Ok(agent.clone()),
             None => {
-                // Fallback: any healthy agent
-                let fallback = agents.iter().find(|a| a.is_healthy());
-                match fallback {
-                    Some(agent) => Ok(agent.clone()),
-                    None => Err(ApiError::Internal(
-                        "No healthy agents available. Cannot route swarm query.".to_string()
-                    ).extend()),
-                }
+                Err(ApiError::Internal(
+                    "No healthy swarm manager agent available. Ensure at least one \
+                     agent is connected to a swarm manager node and is healthy.".to_string()
+                ).extend())
             }
         }
     }
