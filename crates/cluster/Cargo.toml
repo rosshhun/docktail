@@ -34,6 +34,10 @@ tokio-rustls = "0.26"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
+
+# Async Streams
+tokio-stream = "0.1"
 
 # Configuration
 config = "0.15.19"

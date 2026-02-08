@@ -18,6 +18,25 @@ import type {
   ContainerStats,
   LogEvent,
   HealthStatus,
+  DiscoveryStatus,
+  SwarmInfo,
+  NodeView,
+  ServiceView,
+  TaskView,
+  StackView,
+  SwarmNetworkView,
+  SwarmSecretView,
+  SwarmConfigView,
+  ComparisonSource,
+  ServiceCoverageView,
+  StackHealthView,
+  ContainerActionResult,
+  ImageActionResult,
+  ExecCommandResult,
+  ServiceCreateResult,
+  ServiceDeleteResult,
+  ServiceUpdateResult,
+  NodeUpdateResult,
 } from './types';
 
 // ============================================================================
@@ -539,4 +558,526 @@ export async function fetchHistoricalLogs(
   });
   
   return result.logs;
+}
+
+// ============================================================================
+// DISCOVERY QUERIES
+// ============================================================================
+
+export async function fetchDiscoveryStatus(): Promise<DiscoveryStatus> {
+  const result = await query<{ discoveryStatus: DiscoveryStatus }>(`
+    query GetDiscoveryStatus {
+      discoveryStatus {
+        swarmDiscoveryEnabled
+        registrationEnabled
+        discoveryLabel
+        discoveryIntervalSecs
+        agentPort
+        totalAgents
+        staticAgents
+        discoveredAgents
+        registeredAgents
+      }
+    }
+  `);
+  return result.discoveryStatus;
+}
+
+// ============================================================================
+// SWARM QUERIES
+// ============================================================================
+
+export async function fetchSwarmInfo(agentId: string): Promise<SwarmInfo | null> {
+  const result = await query<{ swarmInfo: SwarmInfo | null }>(`
+    query GetSwarmInfo($agentId: String!) {
+      swarmInfo(agentId: $agentId) {
+        swarmId
+        nodeId
+        isManager
+        managers
+        workers
+        isSwarmMode
+      }
+    }
+  `, { agentId });
+  return result.swarmInfo;
+}
+
+export async function fetchNodes(agentId: string): Promise<NodeView[]> {
+  const result = await query<{ nodes: NodeView[] }>(`
+    query GetNodes($agentId: String!) {
+      nodes(agentId: $agentId) {
+        id
+        hostname
+        role
+        availability
+        status
+        addr
+        engineVersion
+        os
+        architecture
+        labels { key value }
+        managerStatus { leader reachability addr }
+        nanoCpus
+        memoryBytes
+        agentId
+      }
+    }
+  `, { agentId });
+  return result.nodes;
+}
+
+export async function fetchNode(nodeId: string, agentId: string): Promise<NodeView | null> {
+  const result = await query<{ node: NodeView | null }>(`
+    query GetNode($nodeId: String!, $agentId: String!) {
+      node(nodeId: $nodeId, agentId: $agentId) {
+        id
+        hostname
+        role
+        availability
+        status
+        addr
+        engineVersion
+        os
+        architecture
+        labels { key value }
+        managerStatus { leader reachability addr }
+        nanoCpus
+        memoryBytes
+        agentId
+      }
+    }
+  `, { nodeId, agentId });
+  return result.node;
+}
+
+export async function fetchServices(agentId: string): Promise<ServiceView[]> {
+  const result = await query<{ services: ServiceView[] }>(`
+    query GetServices($agentId: String!) {
+      services(agentIds: [$agentId]) {
+        id
+        name
+        image
+        mode
+        replicasDesired
+        replicasRunning
+        ports { protocol targetPort publishedPort publishMode }
+        stackNamespace
+        createdAt
+        updatedAt
+        labels { key value }
+        updateStatus { state startedAt completedAt message }
+        placementConstraints
+        networks
+        agentId
+        updateConfig { parallelism delayNs failureAction monitorNs maxFailureRatio order }
+        rollbackConfig { parallelism delayNs failureAction monitorNs maxFailureRatio order }
+        placement { constraints preferences { spreadDescriptor } maxReplicasPerNode platforms { architecture os } }
+        secretReferences { secretId secretName fileName fileUid fileGid fileMode }
+        configReferences { configId configName fileName fileUid fileGid fileMode }
+        restartPolicy { condition delayNs maxAttempts windowNs }
+      }
+    }
+  `, { agentId });
+  return result.services;
+}
+
+export async function fetchService(serviceId: string, agentId: string): Promise<ServiceView | null> {
+  const result = await query<{ service: ServiceView | null }>(`
+    query GetService($serviceId: String!, $agentId: String!) {
+      service(serviceId: $serviceId, agentId: $agentId) {
+        id
+        name
+        image
+        mode
+        replicasDesired
+        replicasRunning
+        ports { protocol targetPort publishedPort publishMode }
+        stackNamespace
+        createdAt
+        updatedAt
+        labels { key value }
+        updateStatus { state startedAt completedAt message }
+        placementConstraints
+        networks
+        agentId
+        updateConfig { parallelism delayNs failureAction monitorNs maxFailureRatio order }
+        rollbackConfig { parallelism delayNs failureAction monitorNs maxFailureRatio order }
+        placement { constraints preferences { spreadDescriptor } maxReplicasPerNode platforms { architecture os } }
+        secretReferences { secretId secretName fileName fileUid fileGid fileMode }
+        configReferences { configId configName fileName fileUid fileGid fileMode }
+        restartPolicy { condition delayNs maxAttempts windowNs }
+      }
+    }
+  `, { serviceId, agentId });
+  return result.service;
+}
+
+export async function fetchTasks(serviceId: string, agentId: string): Promise<TaskView[]> {
+  const result = await query<{ tasks: TaskView[] }>(`
+    query GetTasks($serviceId: String!, $agentId: String!) {
+      tasks(serviceId: $serviceId, agentId: $agentId) {
+        id
+        serviceId
+        serviceName
+        nodeId
+        slot
+        containerId
+        state
+        desiredState
+        statusMessage
+        statusErr
+        createdAt
+        updatedAt
+        exitCode
+        agentId
+      }
+    }
+  `, { serviceId, agentId });
+  return result.tasks;
+}
+
+export async function fetchStacks(agentId: string): Promise<StackView[]> {
+  const result = await query<{ stacks: StackView[] }>(`
+    query GetStacks($agentId: String!) {
+      stacks(agentIds: [$agentId]) {
+        namespace
+        serviceCount
+        replicasDesired
+        replicasRunning
+        services {
+          id
+          name
+          image
+          mode
+          replicasDesired
+          replicasRunning
+          ports { protocol targetPort publishedPort publishMode }
+          stackNamespace
+          createdAt
+          updatedAt
+          labels { key value }
+          agentId
+        }
+        agentId
+      }
+    }
+  `, { agentId });
+  return result.stacks;
+}
+
+export async function fetchStack(stackName: string, agentId: string): Promise<StackView | null> {
+  const result = await query<{ stack: StackView | null }>(`
+    query GetStack($stackName: String!, $agentId: String!) {
+      stack(stackName: $stackName, agentId: $agentId) {
+        namespace
+        serviceCount
+        replicasDesired
+        replicasRunning
+        services {
+          id
+          name
+          image
+          mode
+          replicasDesired
+          replicasRunning
+          ports { protocol targetPort publishedPort publishMode }
+          stackNamespace
+          createdAt
+          updatedAt
+          labels { key value }
+          updateStatus { state startedAt completedAt message }
+          agentId
+          restartPolicy { condition delayNs maxAttempts windowNs }
+        }
+        agentId
+      }
+    }
+  `, { stackName, agentId });
+  return result.stack;
+}
+
+export async function fetchSwarmNetworks(agentId: string, swarmOnly = true): Promise<SwarmNetworkView[]> {
+  const result = await query<{ swarmNetworks: SwarmNetworkView[] }>(`
+    query GetSwarmNetworks($agentId: String!, $swarmOnly: Boolean) {
+      swarmNetworks(agentIds: [$agentId], swarmOnly: $swarmOnly) {
+        id
+        name
+        driver
+        scope
+        isInternal
+        isAttachable
+        isIngress
+        enableIpv6
+        createdAt
+        labels { key value }
+        options { key value }
+        ipamConfigs { subnet gateway ipRange }
+        peers { name ip }
+        serviceAttachments { serviceId serviceName virtualIp }
+        agentId
+      }
+    }
+  `, { agentId, swarmOnly });
+  return result.swarmNetworks;
+}
+
+export async function fetchSwarmSecrets(agentId: string): Promise<SwarmSecretView[]> {
+  const result = await query<{ swarmSecrets: SwarmSecretView[] }>(`
+    query GetSwarmSecrets($agentId: String!) {
+      swarmSecrets(agentIds: [$agentId]) {
+        id
+        name
+        createdAt
+        updatedAt
+        labels { key value }
+        driver
+        agentId
+      }
+    }
+  `, { agentId });
+  return result.swarmSecrets;
+}
+
+export async function fetchSwarmConfigs(agentId: string): Promise<SwarmConfigView[]> {
+  const result = await query<{ swarmConfigs: SwarmConfigView[] }>(`
+    query GetSwarmConfigs($agentId: String!) {
+      swarmConfigs(agentIds: [$agentId]) {
+        id
+        name
+        createdAt
+        updatedAt
+        labels { key value }
+        agentId
+      }
+    }
+  `, { agentId });
+  return result.swarmConfigs;
+}
+
+export async function fetchServiceReplicas(serviceId: string, agentId: string): Promise<ComparisonSource[]> {
+  const result = await query<{ serviceReplicas: ComparisonSource[] }>(`
+    query GetServiceReplicas($serviceId: String!, $agentId: String!) {
+      serviceReplicas(serviceId: $serviceId, agentId: $agentId) {
+        containerId
+        serviceId
+        taskId
+        agentId
+        slot
+        state
+        nodeId
+        hostname
+      }
+    }
+  `, { serviceId, agentId });
+  return result.serviceReplicas;
+}
+
+export async function fetchServiceCoverage(serviceId: string, agentId: string): Promise<ServiceCoverageView> {
+  const result = await query<{ serviceCoverage: ServiceCoverageView }>(`
+    query GetServiceCoverage($serviceId: String!, $agentId: String!) {
+      serviceCoverage(serviceId: $serviceId, agentId: $agentId) {
+        coveredNodes
+        uncoveredNodes
+        totalNodes
+        coveragePercentage
+        serviceId
+        isGlobal
+        agentId
+      }
+    }
+  `, { serviceId, agentId });
+  return result.serviceCoverage;
+}
+
+export async function fetchStackHealth(stackName: string, agentId: string): Promise<StackHealthView> {
+  const result = await query<{ stackHealth: StackHealthView }>(`
+    query GetStackHealth($stackName: String!, $agentId: String!) {
+      stackHealth(stackName: $stackName, agentId: $agentId) {
+        name
+        status
+        serviceHealths {
+          serviceId
+          serviceName
+          status
+          replicasDesired
+          replicasRunning
+          replicasFailed
+          recentErrors
+          updateInProgress
+          restartPolicy { condition delayNs maxAttempts windowNs }
+        }
+        totalServices
+        healthyServices
+        degradedServices
+        unhealthyServices
+        totalDesired
+        totalRunning
+        totalFailed
+        agentId
+      }
+    }
+  `, { stackName, agentId });
+  return result.stackHealth;
+}
+
+// ============================================================================
+// CONTAINER MUTATIONS
+// ============================================================================
+
+export async function startContainer(containerId: string, agentId: string): Promise<ContainerActionResult> {
+  const result = await query<{ startContainer: ContainerActionResult }>(`
+    mutation StartContainer($input: ContainerActionInput!) {
+      startContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId } });
+  return result.startContainer;
+}
+
+export async function stopContainer(containerId: string, agentId: string): Promise<ContainerActionResult> {
+  const result = await query<{ stopContainer: ContainerActionResult }>(`
+    mutation StopContainer($input: ContainerActionInput!) {
+      stopContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId } });
+  return result.stopContainer;
+}
+
+export async function restartContainer(containerId: string, agentId: string): Promise<ContainerActionResult> {
+  const result = await query<{ restartContainer: ContainerActionResult }>(`
+    mutation RestartContainer($input: ContainerActionInput!) {
+      restartContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId } });
+  return result.restartContainer;
+}
+
+export async function pauseContainer(containerId: string, agentId: string): Promise<ContainerActionResult> {
+  const result = await query<{ pauseContainer: ContainerActionResult }>(`
+    mutation PauseContainer($input: ContainerActionInput!) {
+      pauseContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId } });
+  return result.pauseContainer;
+}
+
+export async function unpauseContainer(containerId: string, agentId: string): Promise<ContainerActionResult> {
+  const result = await query<{ unpauseContainer: ContainerActionResult }>(`
+    mutation UnpauseContainer($input: ContainerActionInput!) {
+      unpauseContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId } });
+  return result.unpauseContainer;
+}
+
+export async function removeContainer(containerId: string, agentId: string, force = false): Promise<ContainerActionResult> {
+  const result = await query<{ removeContainer: ContainerActionResult }>(`
+    mutation RemoveContainer($input: ContainerRemoveInput!) {
+      removeContainer(input: $input) {
+        success message containerId newState
+      }
+    }
+  `, { input: { containerId, agentId, force } });
+  return result.removeContainer;
+}
+
+// ============================================================================
+// IMAGE MUTATIONS
+// ============================================================================
+
+export async function pullImage(image: string, tag: string, agentId: string): Promise<ImageActionResult> {
+  const result = await query<{ pullImage: ImageActionResult }>(`
+    mutation PullImage($input: ImagePullInput!) {
+      pullImage(input: $input) {
+        success message
+      }
+    }
+  `, { input: { image, tag, agentId } });
+  return result.pullImage;
+}
+
+export async function removeImage(imageId: string, agentId: string, force = false): Promise<ImageActionResult> {
+  const result = await query<{ removeImage: ImageActionResult }>(`
+    mutation RemoveImage($input: ImageRemoveInput!) {
+      removeImage(input: $input) {
+        success message
+      }
+    }
+  `, { input: { imageId, agentId, force } });
+  return result.removeImage;
+}
+
+// ============================================================================
+// EXEC MUTATIONS
+// ============================================================================
+
+export async function execCommand(
+  containerId: string,
+  agentId: string,
+  command: string[],
+  options?: { workingDir?: string; env?: string[]; timeout?: number }
+): Promise<ExecCommandResult> {
+  const result = await query<{ execCommand: ExecCommandResult }>(`
+    mutation ExecCommand($input: ExecCommandInput!) {
+      execCommand(input: $input) {
+        exitCode stdout stderr executionTimeMs timedOut
+      }
+    }
+  `, { input: { containerId, agentId, command, ...options } });
+  return result.execCommand;
+}
+
+// ============================================================================
+// SERVICE MUTATIONS
+// ============================================================================
+
+export async function updateServiceReplicas(serviceId: string, agentId: string, replicas: number): Promise<ServiceUpdateResult> {
+  const result = await query<{ updateService: ServiceUpdateResult }>(`
+    mutation UpdateService($input: ServiceUpdateInput!) {
+      updateService(input: $input) {
+        success message
+      }
+    }
+  `, { input: { serviceId, agentId, replicas } });
+  return result.updateService;
+}
+
+export async function deleteService(serviceId: string, agentId: string): Promise<ServiceDeleteResult> {
+  const result = await query<{ deleteService: ServiceDeleteResult }>(`
+    mutation DeleteService($input: ServiceDeleteInput!) {
+      deleteService(input: $input) {
+        success message
+      }
+    }
+  `, { input: { serviceId, agentId } });
+  return result.deleteService;
+}
+
+// ============================================================================
+// NODE MUTATIONS
+// ============================================================================
+
+export async function updateNode(
+  nodeId: string,
+  agentId: string,
+  options: { availability?: string; role?: string; labels?: Array<{ key: string; value: string }> }
+): Promise<NodeUpdateResult> {
+  const result = await query<{ updateNode: NodeUpdateResult }>(`
+    mutation UpdateNode($input: NodeUpdateInput!) {
+      updateNode(input: $input) {
+        success message
+      }
+    }
+  `, { input: { nodeId, agentId, ...options } });
+  return result.updateNode;
 }

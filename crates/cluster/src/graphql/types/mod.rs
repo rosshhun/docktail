@@ -5,3 +5,4 @@ pub mod agent;
 pub mod container;
 pub mod log;
 pub mod stats;
+pub mod swarm;

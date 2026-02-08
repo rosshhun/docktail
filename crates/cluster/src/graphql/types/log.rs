@@ -28,6 +28,21 @@ impl Default for ContainerLookupCache {
     }
 }
 
+/// Swarm context — identifies which service/task/node produced a log entry
+#[derive(Debug, Clone, SimpleObject)]
+pub struct SwarmLogContext {
+    /// Service ID
+    pub service_id: String,
+    /// Service name
+    pub service_name: String,
+    /// Task ID that produced the log
+    pub task_id: String,
+    /// Task slot (replica index)
+    pub task_slot: u64,
+    /// Node ID that ran the task
+    pub node_id: String,
+}
+
 /// Log entry from a container
 #[derive(Debug, Clone, SimpleObject)]
 #[graphql(complex)]
@@ -68,6 +83,9 @@ pub struct LogEntry {
     
     /// Quick check for grouped logs
     pub is_grouped: bool,
+    
+    /// Swarm context (populated for service log entries)
+    pub swarm_context: Option<SwarmLogContext>,
 }
 
 /// Individual log line within a multiline group
@@ -442,6 +460,13 @@ impl LogEntry {
             grouped_lines,
             line_count: response.line_count as i32,
             is_grouped: response.is_grouped,
+            swarm_context: response.swarm_context.map(|sc| SwarmLogContext {
+                service_id: sc.service_id,
+                service_name: sc.service_name,
+                task_id: sc.task_id,
+                task_slot: sc.task_slot,
+                node_id: sc.node_id,
+            }),
         })
     }
 }

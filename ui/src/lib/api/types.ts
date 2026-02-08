@@ -550,3 +550,540 @@ export interface HealthStatus {
   /** Timestamp of health check (ISO-8601) */
   timestamp: string;
 }
+
+// ============================================================================
+// DISCOVERY TYPES
+// ============================================================================
+
+/**
+ * Agent discovery status view
+ */
+export interface DiscoveryStatus {
+  swarmDiscoveryEnabled: boolean;
+  registrationEnabled: boolean;
+  discoveryLabel: string;
+  discoveryIntervalSecs: number;
+  agentPort: number;
+  totalAgents: number;
+  staticAgents: number;
+  discoveredAgents: number;
+  registeredAgents: number;
+}
+
+/**
+ * Agent source enum
+ */
+export type AgentSource = 'STATIC' | 'DISCOVERED' | 'REGISTERED';
+
+// ============================================================================
+// SWARM TYPES
+// ============================================================================
+
+/**
+ * Swarm cluster info
+ */
+export interface SwarmInfo {
+  swarmId: string;
+  nodeId: string;
+  isManager: boolean;
+  managers: number;
+  workers: number;
+  isSwarmMode: boolean;
+}
+
+/**
+ * Node role enum
+ */
+export type NodeRole = 'UNKNOWN' | 'MANAGER' | 'WORKER';
+
+/**
+ * Node availability enum
+ */
+export type NodeAvailability = 'UNKNOWN' | 'ACTIVE' | 'PAUSE' | 'DRAIN';
+
+/**
+ * Node state enum
+ */
+export type NodeState = 'UNKNOWN' | 'READY' | 'DOWN' | 'DISCONNECTED';
+
+/**
+ * Manager status info
+ */
+export interface ManagerStatus {
+  leader: boolean;
+  reachability: string;
+  addr: string;
+}
+
+/**
+ * Swarm node view
+ */
+export interface NodeView {
+  id: string;
+  hostname: string;
+  role: NodeRole;
+  availability: NodeAvailability;
+  status: NodeState;
+  addr: string;
+  engineVersion: string;
+  os: string;
+  architecture: string;
+  labels: Array<{ key: string; value: string }>;
+  managerStatus?: ManagerStatus;
+  nanoCpus: string;
+  memoryBytes: string;
+  agentId: string;
+}
+
+/**
+ * Service mode enum
+ */
+export type ServiceMode = 'UNKNOWN' | 'REPLICATED' | 'GLOBAL' | 'REPLICATED_JOB' | 'GLOBAL_JOB';
+
+/**
+ * Service port view
+ */
+export interface ServicePort {
+  protocol: string;
+  targetPort: number;
+  publishedPort: number;
+  publishMode: string;
+}
+
+/**
+ * Update status view
+ */
+export interface UpdateStatus {
+  state: string;
+  startedAt: string;
+  completedAt: string;
+  message: string;
+}
+
+/**
+ * Update config view
+ */
+export interface UpdateConfig {
+  parallelism: number;
+  delayNs: number;
+  failureAction: string;
+  monitorNs: number;
+  maxFailureRatio: number;
+  order: string;
+}
+
+/**
+ * Service placement view
+ */
+export interface ServicePlacement {
+  constraints: string[];
+  preferences: Array<{ spreadDescriptor: string }>;
+  maxReplicasPerNode: number;
+  platforms: Array<{ architecture: string; os: string }>;
+}
+
+/**
+ * Secret reference view
+ */
+export interface SecretReference {
+  secretId: string;
+  secretName: string;
+  fileName: string;
+  fileUid: string;
+  fileGid: string;
+  fileMode: number;
+}
+
+/**
+ * Config reference view
+ */
+export interface ConfigReference {
+  configId: string;
+  configName: string;
+  fileName: string;
+  fileUid: string;
+  fileGid: string;
+  fileMode: number;
+}
+
+/**
+ * Service restart policy view
+ */
+export interface ServiceRestartPolicy {
+  condition: string;
+  delayNs: number;
+  maxAttempts: number;
+  windowNs: number;
+}
+
+/**
+ * Swarm service view
+ */
+export interface ServiceView {
+  id: string;
+  name: string;
+  image: string;
+  mode: ServiceMode;
+  replicasDesired: number;
+  replicasRunning: number;
+  ports: ServicePort[];
+  stackNamespace?: string;
+  createdAt: string;
+  updatedAt: string;
+  labels: Array<{ key: string; value: string }>;
+  updateStatus?: UpdateStatus;
+  placementConstraints: string[];
+  networks: string[];
+  agentId: string;
+  updateConfig?: UpdateConfig;
+  rollbackConfig?: UpdateConfig;
+  placement?: ServicePlacement;
+  secretReferences: SecretReference[];
+  configReferences: ConfigReference[];
+  restartPolicy?: ServiceRestartPolicy;
+}
+
+/**
+ * Task state enum
+ */
+export type TaskState = string;
+
+/**
+ * Swarm task view
+ */
+export interface TaskView {
+  id: string;
+  serviceId: string;
+  serviceName: string;
+  nodeId: string;
+  slot: number;
+  containerId?: string;
+  state: TaskState;
+  desiredState: string;
+  statusMessage: string;
+  statusErr?: string;
+  createdAt: string;
+  updatedAt: string;
+  exitCode?: number;
+  agentId: string;
+}
+
+/**
+ * Stack view
+ */
+export interface StackView {
+  namespace: string;
+  serviceCount: number;
+  replicasDesired: number;
+  replicasRunning: number;
+  services: ServiceView[];
+  agentId: string;
+}
+
+/**
+ * IPAM config view
+ */
+export interface IpamConfig {
+  subnet: string;
+  gateway: string;
+  ipRange: string;
+}
+
+/**
+ * Network service attachment view
+ */
+export interface NetworkServiceAttachment {
+  serviceId: string;
+  serviceName: string;
+  virtualIp: string;
+}
+
+/**
+ * Swarm network view
+ */
+export interface SwarmNetworkView {
+  id: string;
+  name: string;
+  driver: string;
+  scope: string;
+  isInternal: boolean;
+  isAttachable: boolean;
+  isIngress: boolean;
+  enableIpv6: boolean;
+  createdAt: string;
+  labels: Array<{ key: string; value: string }>;
+  options: Array<{ key: string; value: string }>;
+  ipamConfigs: IpamConfig[];
+  peers: Array<{ name: string; ip: string }>;
+  serviceAttachments: NetworkServiceAttachment[];
+  agentId: string;
+}
+
+/**
+ * Swarm secret view
+ */
+export interface SwarmSecretView {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  labels: Array<{ key: string; value: string }>;
+  driver: string;
+  agentId: string;
+}
+
+/**
+ * Swarm config view
+ */
+export interface SwarmConfigView {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  labels: Array<{ key: string; value: string }>;
+  agentId: string;
+}
+
+/**
+ * Comparison source for replica comparison
+ */
+export interface ComparisonSource {
+  containerId: string;
+  serviceId: string;
+  taskId: string;
+  agentId: string;
+  slot: number;
+  state: string;
+  nodeId: string;
+  hostname: string;
+}
+
+/**
+ * Comparison log event (multi-lane)
+ */
+export interface ComparisonLogEvent {
+  laneIndex: number;
+  laneLabel: string;
+  content: string;
+  syncTimestamp: string;
+}
+
+/**
+ * Service update event view
+ */
+export interface ServiceUpdateEvent {
+  updateState: string;
+  startedAt: string;
+  completedAt: string;
+  message: string;
+  tasksTotal: number;
+  tasksRunning: number;
+  tasksReady: number;
+  tasksFailed: number;
+  tasksShutdown: number;
+  snapshotAt: string;
+  recentChanges: TaskStateChange[];
+}
+
+/**
+ * Task state change view
+ */
+export interface TaskStateChange {
+  taskId: string;
+  serviceId: string;
+  nodeId: string;
+  slot: number;
+  state: string;
+  desiredState: string;
+  message: string;
+  timestamp: string;
+  updatedAt: string;
+}
+
+/**
+ * Node event types
+ */
+export type NodeEventType = 'UNKNOWN' | 'STATE_CHANGE' | 'AVAILABILITY_CHANGE' | 'ROLE_CHANGE' | 'DRAIN_STARTED' | 'DRAIN_COMPLETED' | 'NODE_DOWN' | 'NODE_READY';
+
+/**
+ * Node event view
+ */
+export interface NodeEvent {
+  nodeId: string;
+  hostname: string;
+  eventType: NodeEventType;
+  previousValue: string;
+  currentValue: string;
+  affectedTasks: TaskView[];
+  timestamp: string;
+}
+
+/**
+ * Service scaling event types
+ */
+export type ScalingEventType = 'UNKNOWN' | 'SCALED_UP' | 'SCALED_DOWN' | 'UPDATE_STARTED' | 'UPDATE_COMPLETED' | 'UPDATE_ROLLED_BACK' | 'TASK_FAILED' | 'TASK_RECOVERED';
+
+/**
+ * Service scaling event
+ */
+export interface ServiceScalingEvent {
+  serviceId: string;
+  serviceName: string;
+  previousReplicas: number;
+  currentReplicas: number;
+  eventType: ScalingEventType;
+  timestamp: string;
+  affectedTasks: TaskView[];
+}
+
+/**
+ * Service coverage view
+ */
+export interface ServiceCoverageView {
+  coveredNodes: string[];
+  uncoveredNodes: string[];
+  totalNodes: number;
+  coveragePercentage: number;
+  serviceId: string;
+  isGlobal: boolean;
+  agentId: string;
+}
+
+/**
+ * Service health status enum
+ */
+export type ServiceHealthStatus = 'UNKNOWN' | 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
+
+/**
+ * Stack health status enum
+ */
+export type StackHealthStatus = 'UNKNOWN' | 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
+
+/**
+ * Service health view
+ */
+export interface ServiceHealthView {
+  serviceId: string;
+  serviceName: string;
+  status: ServiceHealthStatus;
+  replicasDesired: number;
+  replicasRunning: number;
+  replicasFailed: number;
+  recentErrors: string[];
+  updateInProgress: boolean;
+  restartPolicy?: ServiceRestartPolicy;
+}
+
+/**
+ * Stack health view
+ */
+export interface StackHealthView {
+  name: string;
+  status: StackHealthStatus;
+  serviceHealths: ServiceHealthView[];
+  totalServices: number;
+  healthyServices: number;
+  degradedServices: number;
+  unhealthyServices: number;
+  totalDesired: number;
+  totalRunning: number;
+  totalFailed: number;
+  agentId: string;
+}
+
+/**
+ * Restart event type enum
+ */
+export type RestartEventType = 'UNKNOWN' | 'TASK_RESTARTED' | 'CRASH_LOOP' | 'OOM_KILLED';
+
+/**
+ * Service restart event
+ */
+export interface ServiceRestartEvent {
+  serviceId: string;
+  serviceName: string;
+  eventType: RestartEventType;
+  newTask?: TaskView;
+  oldTask?: TaskView;
+  message: string;
+  restartCount: number;
+  timestamp: string;
+  agentId: string;
+}
+
+// ============================================================================
+// MUTATION RESULT TYPES
+// ============================================================================
+
+/**
+ * Container action result
+ */
+export interface ContainerActionResult {
+  success: boolean;
+  message: string;
+  containerId: string;
+  newState?: string;
+}
+
+/**
+ * Image action result
+ */
+export interface ImageActionResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Exec command result
+ */
+export interface ExecCommandResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  executionTimeMs: number;
+  timedOut: boolean;
+}
+
+/**
+ * Service create result
+ */
+export interface ServiceCreateResult {
+  success: boolean;
+  message: string;
+  serviceId?: string;
+}
+
+/**
+ * Service delete result
+ */
+export interface ServiceDeleteResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Service update result
+ */
+export interface ServiceUpdateResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Node update result
+ */
+export interface NodeUpdateResult {
+  success: boolean;
+  message: string;
+}
+
+/**
+ * Swarm log context
+ */
+export interface SwarmLogContext {
+  serviceId: string;
+  serviceName: string;
+  taskId: string;
+  taskSlot: number;
+  nodeId: string;
+}

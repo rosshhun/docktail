@@ -9,6 +9,8 @@ pub struct ClusterConfig {
     pub security: SecurityConfig,
     pub logging: LoggingConfig,
     pub graphql: GraphQLConfig,
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -83,6 +85,45 @@ pub struct GraphQLConfig {
     pub enable_graphiql: bool,
     pub max_depth: usize,
     pub max_complexity: usize,
+}
+
+/// Agent auto-discovery configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    /// Enable Swarm-aware auto-discovery via node labels
+    pub swarm_discovery: bool,
+    /// Node label to identify agent nodes (e.g. "docktail.agent=true")
+    pub discovery_label: String,
+    /// How often to poll for new agents (seconds)
+    pub discovery_interval_secs: u64,
+    /// Default gRPC port for discovered agents
+    pub agent_port: u16,
+    /// Enable HTTP registration endpoint (POST /api/agents/register)
+    pub registration_enabled: bool,
+    /// TLS cert/key/ca for discovered agents (shared credentials)
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    pub tls_ca: Option<String>,
+    /// TLS domain for discovered agents
+    #[serde(default = "default_tls_domain")]
+    pub tls_domain: String,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            swarm_discovery: false,
+            discovery_label: "docktail.agent=true".to_string(),
+            discovery_interval_secs: 30,
+            agent_port: 50051,
+            registration_enabled: false,
+            tls_cert: None,
+            tls_key: None,
+            tls_ca: None,
+            tls_domain: "localhost".to_string(),
+        }
+    }
 }
 
 impl ClusterConfig {
@@ -197,6 +238,7 @@ impl Default for ClusterConfig {
                 max_depth: 15,
                 max_complexity: 1000,
             },
+            discovery: DiscoveryConfig::default(),
         }
     }
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { location } from "svelte-spa-router";
-  import { Server, Box, Settings, Network } from "@lucide/svelte";
+  import { Server, Box, Settings, Network, Layers, GitBranch, KeyRound } from "@lucide/svelte";
 
   // Helper function to check if a route is active
   function isRouteActive(path: string, exact = false): boolean {
@@ -36,6 +36,11 @@
       return false;
     }
 
+    // Special handling for swarm routes
+    if (path === "/swarm") {
+      return $location === "/swarm" || $location.startsWith("/swarm/");
+    }
+
     // For non-exact matches, check if location starts with the path
     // Special case for root/containers
     if (path === "/containers" || path === "/") {
@@ -52,6 +57,15 @@
 
     return $location === path || $location.startsWith(path + "/");
   }
+
+  let swarmExpanded = $state(false);
+
+  // Auto-expand swarm section when on a swarm route
+  $effect(() => {
+    if ($location.startsWith('/swarm')) {
+      swarmExpanded = true;
+    }
+  });
 </script>
 
 <aside
@@ -129,6 +143,37 @@
           </div>
           <span class="text-[10px] font-semibold mt-0.5">Cluster</span>
         </a>
+      </li>
+      <li>
+        <button
+          onclick={() => swarmExpanded = !swarmExpanded}
+          class="w-full group flex flex-col items-center gap-1 px-2 py-2.5 text-xs font-medium transition-all duration-200 relative cursor-pointer {isRouteActive(
+            '/swarm',
+          )
+            ? 'text-[rgb(var(--color-text-primary))]'
+            : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}"
+        >
+          <div
+            class="w-10 h-10 rounded-md flex items-center justify-center transition-colors {isRouteActive(
+              '/swarm',
+            )
+              ? 'bg-[rgb(var(--color-bg-tertiary))]'
+              : 'hover:bg-[rgb(var(--color-bg-tertiary))]'}"
+          >
+            <Layers class="w-[21px] h-[24px]" strokeWidth={2} />
+          </div>
+          <span class="text-[10px] font-semibold mt-0.5">Swarm</span>
+        </button>
+        {#if swarmExpanded}
+          <div class="flex flex-col items-center gap-0.5 pb-1">
+            <a href="#/swarm" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location === '/swarm' ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Overview</a>
+            <a href="#/swarm/services" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location.startsWith('/swarm/services') ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Services</a>
+            <a href="#/swarm/nodes" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location.startsWith('/swarm/nodes') ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Nodes</a>
+            <a href="#/swarm/stacks" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location.startsWith('/swarm/stacks') ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Stacks</a>
+            <a href="#/swarm/networks" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location === '/swarm/networks' ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Networks</a>
+            <a href="#/swarm/secrets" class="text-[9px] font-medium py-1 px-2 rounded transition-colors {$location === '/swarm/secrets' ? 'text-[rgb(var(--color-accent-blue))]' : 'text-[rgb(var(--color-text-secondary))] hover:text-[rgb(var(--color-text-primary))]'}">Secrets</a>
+          </div>
+        {/if}
       </li>
 
       <!-- Separator -->

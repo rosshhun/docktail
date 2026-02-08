@@ -25,8 +25,8 @@ use config::AgentConfig;
 use docker::client::DockerClient;
 use state::AgentState;
 use service::{
-    LogServiceImpl, InventoryServiceImpl, HealthServiceImpl, StatsServiceImpl,
-    LogServiceServer, InventoryServiceServer, HealthServiceServer, StatsServiceServer,
+    LogServiceImpl, InventoryServiceImpl, HealthServiceImpl, StatsServiceImpl, ControlServiceImpl, SwarmServiceImpl, ShellServiceImpl,
+    LogServiceServer, InventoryServiceServer, HealthServiceServer, StatsServiceServer, ControlServiceServer, SwarmServiceServer, ShellServiceServer,
 };
 
 /// Wrapper for TlsStream that implements tonic's Connected trait
@@ -123,6 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inventory_service = InventoryServiceImpl::new(Arc::clone(&state));
     let health_service = HealthServiceImpl::new(Arc::clone(&state.metrics));
     let stats_service = StatsServiceImpl::new(Arc::clone(&state));
+    let control_service = ControlServiceImpl::new(Arc::clone(&state));
+    let swarm_service = SwarmServiceImpl::new(Arc::clone(&state));
+    let shell_service = ShellServiceImpl::new(Arc::clone(&state));
 
     let addr: SocketAddr = config.bind_address.parse()
         .map_err(|e| {
@@ -158,6 +161,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✓ Registered InventoryService");
     info!("✓ Registered HealthService");
     info!("✓ Registered StatsService");
+    info!("✓ Registered ControlService");
+    info!("✓ Registered SwarmService");
+    info!("✓ Registered ShellService");
     info!("");
     info!("========================================");
     info!("Docktail Agent is ready!");
@@ -200,6 +206,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(InventoryServiceServer::new(inventory_service))
         .add_service(HealthServiceServer::new(health_service))
         .add_service(StatsServiceServer::new(stats_service))
+        .add_service(ControlServiceServer::new(control_service))
+        .add_service(SwarmServiceServer::new(swarm_service))
+        .add_service(ShellServiceServer::new(shell_service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
 

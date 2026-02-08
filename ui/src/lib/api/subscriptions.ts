@@ -13,6 +13,11 @@ import type {
   LogEvent,
   AgentHealthEvent,
   ContainerStats,
+  ServiceUpdateEvent,
+  ComparisonLogEvent,
+  NodeEvent,
+  ServiceScalingEvent,
+  ServiceRestartEvent,
 } from './types';
 
 /** GraphQL WebSocket endpoint */
@@ -604,4 +609,205 @@ export function subscribeToContainerStats(
       ws.close();
     }
   };
+}
+
+// ============================================================================
+// GENERIC SUBSCRIPTION HELPER
+// ============================================================================
+
+function createSubscription<T>(
+  subscriptionQuery: string,
+  variables: Record<string, any>,
+  dataField: string,
+  onMessage: (data: T) => void,
+  onError?: (error: Error) => void
+): () => void {
+  const ws = new WebSocket(GRAPHQL_WS_ENDPOINT, 'graphql-transport-ws');
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'connection_init', payload: {} }));
+  };
+
+  ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'connection_ack') {
+      ws.send(JSON.stringify({
+        id: '1',
+        type: 'subscribe',
+        payload: { query: subscriptionQuery, variables },
+      }));
+    } else if (message.type === 'next') {
+      if (message.payload.errors?.length > 0) {
+        const e = message.payload.errors[0];
+        onError?.(new GraphQLError(e.message, e.extensions?.code, e));
+        return;
+      }
+      if (message.payload.data?.[dataField]) {
+        onMessage(message.payload.data[dataField]);
+      }
+    } else if (message.type === 'error') {
+      const e = Array.isArray(message.payload) ? message.payload[0] : message.payload;
+      onError?.(new GraphQLError(e?.message || 'Subscription error', e?.extensions?.code, e));
+    }
+  };
+
+  ws.onerror = () => {
+    onError?.(new GraphQLError('WebSocket connection error', 'WEBSOCKET_ERROR'));
+  };
+
+  return () => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ id: '1', type: 'complete' }));
+      ws.close();
+    }
+  };
+}
+
+// ============================================================================
+// SERVICE LOG SUBSCRIPTIONS
+// ============================================================================
+
+export function subscribeToServiceLogs(
+  serviceId: string,
+  agentId: string,
+  onMessage: (log: LogEvent) => void,
+  onError?: (error: Error) => void,
+  options?: { tail?: number; follow?: boolean }
+): () => void {
+  return createSubscription<LogEvent>(
+    `subscription ServiceLogs($serviceId: String!, $agentId: String!, $tail: Int, $follow: Boolean) {
+      serviceLogStream(serviceId: $serviceId, agentId: $agentId, tail: $tail, follow: $follow) {
+        containerId agentId timestamp content level sequence format parseSuccess
+        groupedLines { content timestamp sequence }
+        lineCount isGrouped
+        swarmContext { serviceId serviceName taskId taskSlot nodeId }
+        parsed { level message logger timestamp request { method path statusCode durationMs } error { errorType errorMessage } fields { key value } }
+      }
+    }`,
+    { serviceId, agentId, tail: options?.tail ?? 100, follow: options?.follow ?? true },
+    'serviceLogStream',
+    onMessage,
+    onError
+  );
+}
+
+export function subscribeToStackLogs(
+  stackName: string,
+  agentId: string,
+  onMessage: (log: LogEvent) => void,
+  onError?: (error: Error) => void,
+  options?: { tail?: number; follow?: boolean }
+): () => void {
+  return createSubscription<LogEvent>(
+    `subscription StackLogs($stackName: String!, $agentId: String!, $tail: Int, $follow: Boolean) {
+      stackLogStream(stackName: $stackName, agentId: $agentId, tail: $tail, follow: $follow) {
+        containerId agentId timestamp content level sequence format parseSuccess
+        groupedLines { content timestamp sequence }
+        lineCount isGrouped
+        swarmContext { serviceId serviceName taskId taskSlot nodeId }
+        parsed { level message logger timestamp request { method path statusCode durationMs } error { errorType errorMessage } fields { key value } }
+      }
+    }`,
+    { stackName, agentId, tail: options?.tail ?? 100, follow: options?.follow ?? true },
+    'stackLogStream',
+    onMessage,
+    onError
+  );
+}
+
+// ============================================================================
+// SERVICE UPDATE SUBSCRIPTIONS
+// ============================================================================
+
+export function subscribeToServiceUpdates(
+  serviceId: string,
+  agentId: string,
+  onMessage: (event: ServiceUpdateEvent) => void,
+  onError?: (error: Error) => void
+): () => void {
+  return createSubscription<ServiceUpdateEvent>(
+    `subscription ServiceUpdates($serviceId: String!, $agentId: String!) {
+      serviceUpdateStream(serviceId: $serviceId, agentId: $agentId) {
+        updateState startedAt completedAt message
+        tasksTotal tasksRunning tasksReady tasksFailed tasksShutdown snapshotAt
+        recentChanges { taskId serviceId nodeId slot state desiredState message timestamp updatedAt }
+      }
+    }`,
+    { serviceId, agentId },
+    'serviceUpdateStream',
+    onMessage,
+    onError
+  );
+}
+
+// ============================================================================
+// NODE EVENT SUBSCRIPTIONS
+// ============================================================================
+
+export function subscribeToNodeEvents(
+  agentId: string,
+  onMessage: (event: NodeEvent) => void,
+  onError?: (error: Error) => void
+): () => void {
+  return createSubscription<NodeEvent>(
+    `subscription NodeEvents($agentId: String!) {
+      nodeEventStream(agentId: $agentId) {
+        nodeId hostname eventType previousValue currentValue timestamp
+        affectedTasks { id serviceId serviceName nodeId slot state desiredState statusMessage createdAt updatedAt agentId }
+      }
+    }`,
+    { agentId },
+    'nodeEventStream',
+    onMessage,
+    onError
+  );
+}
+
+// ============================================================================
+// SERVICE SCALING EVENT SUBSCRIPTIONS
+// ============================================================================
+
+export function subscribeToServiceEvents(
+  serviceId: string,
+  agentId: string,
+  onMessage: (event: ServiceScalingEvent) => void,
+  onError?: (error: Error) => void
+): () => void {
+  return createSubscription<ServiceScalingEvent>(
+    `subscription ServiceEvents($serviceId: String!, $agentId: String!) {
+      serviceEvents(serviceId: $serviceId, agentId: $agentId) {
+        serviceId serviceName previousReplicas currentReplicas eventType timestamp
+        affectedTasks { id serviceId serviceName nodeId slot state desiredState statusMessage createdAt updatedAt agentId }
+      }
+    }`,
+    { serviceId, agentId },
+    'serviceEvents',
+    onMessage,
+    onError
+  );
+}
+
+// ============================================================================
+// SERVICE RESTART EVENT SUBSCRIPTIONS
+// ============================================================================
+
+export function subscribeToServiceRestartEvents(
+  serviceId: string,
+  agentId: string,
+  onMessage: (event: ServiceRestartEvent) => void,
+  onError?: (error: Error) => void
+): () => void {
+  return createSubscription<ServiceRestartEvent>(
+    `subscription ServiceRestartEvents($serviceId: String!, $agentId: String!) {
+      serviceRestartEvents(serviceId: $serviceId, agentId: $agentId) {
+        serviceId serviceName eventType message restartCount timestamp agentId
+        newTask { id serviceId serviceName nodeId slot state desiredState statusMessage createdAt updatedAt agentId }
+        oldTask { id serviceId serviceName nodeId slot state desiredState statusMessage createdAt updatedAt agentId }
+      }
+    }`,
+    { serviceId, agentId },
+    'serviceRestartEvents',
+    onMessage,
+    onError
+  );
 }

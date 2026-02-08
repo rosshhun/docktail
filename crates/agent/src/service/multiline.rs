@@ -272,6 +272,7 @@ impl LogGroup {
             raw_content: self.primary.raw_content,
             parsed: self.primary.parsed,
             metadata: self.primary.metadata,
+            swarm_context: self.primary.swarm_context,
         }
     }
 }
@@ -644,6 +645,7 @@ mod tests {
             grouped_lines: Vec::new(),
             line_count: 1,
             is_grouped: false,
+            swarm_context: None,
         }
     }
 

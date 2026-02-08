@@ -103,12 +103,14 @@ impl LogServiceImpl {
         LogFormat::PlainText
     }
 
-    /// Convert protobuf FilterMode to internal FilterMode
-    fn convert_filter_mode(proto_mode: i32) -> FilterMode {
+    /// Convert protobuf FilterMode to internal FilterMode.
+    /// Returns `None` for FILTER_MODE_NONE and FILTER_MODE_UNSPECIFIED,
+    /// meaning no filter should be applied even when a pattern is present.
+    fn convert_filter_mode(proto_mode: i32) -> Option<FilterMode> {
         match ProtoFilterMode::try_from(proto_mode) {
-            Ok(ProtoFilterMode::Include) => FilterMode::Include,
-            Ok(ProtoFilterMode::Exclude) => FilterMode::Exclude,
-            _ => FilterMode::Include, // Default to Include for safety
+            Ok(ProtoFilterMode::Include) => Some(FilterMode::Include),
+            Ok(ProtoFilterMode::Exclude) => Some(FilterMode::Exclude),
+            _ => None, // NONE / Unspecified => no filtering
         }
     }
 
@@ -130,8 +132,8 @@ impl LogServiceImpl {
             since: req.since,
             until: req.until,
             follow: req.follow,
-            filter_pattern: req.filter_pattern,
-            filter_mode,
+            filter_pattern: if filter_mode.is_some() { req.filter_pattern } else { None },
+            filter_mode: filter_mode.unwrap_or(FilterMode::Include),
             tail_lines: req.tail_lines,
         })
     }
@@ -220,15 +222,18 @@ impl LogService for LogServiceImpl {
         let internal_req = Self::convert_request(req_with_trimmed_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid request: {}", e)))?;
 
-        // Create filter if pattern is provided
+        // Create filter if pattern is provided AND mode is explicitly Include or Exclude.
+        // FILTER_MODE_NONE / UNSPECIFIED means "no filtering" even when a pattern is present.
         let filter = if let Some(pattern) = &req.filter_pattern {
-            let filter_mode = Self::convert_filter_mode(req.filter_mode);
-            
-            match FilterEngine::new(pattern, false, filter_mode) {
-                Ok(engine) => Some(Arc::new(engine)),
-                Err(e) => {
-                    return Err(Status::invalid_argument(format!("Invalid regex pattern: {}", e)));
+            if let Some(filter_mode) = Self::convert_filter_mode(req.filter_mode) {
+                match FilterEngine::new(pattern, false, filter_mode) {
+                    Ok(engine) => Some(Arc::new(engine)),
+                    Err(e) => {
+                        return Err(Status::invalid_argument(format!("Invalid regex pattern: {}", e)));
+                    }
                 }
+            } else {
+                None // Mode is NONE/Unspecified => skip filtering
             }
         } else {
             None
@@ -397,6 +402,7 @@ impl LogService for LogServiceImpl {
                             grouped_lines: Vec::new(),
                             line_count: 1,
                             is_grouped: false,
+                            swarm_context: None,
                         };
 
                         // Multiline grouping

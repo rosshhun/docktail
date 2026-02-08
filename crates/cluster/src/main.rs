@@ -8,10 +8,10 @@ mod state;
 use anyhow::{Context, Result};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse, GraphQLSubscription};
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{header, Method, StatusCode},
     response::{Html, IntoResponse, Json},
-    routing::{get, post},
+    routing::{get, post, delete},
     Router,
 };
 use serde_json::json;
@@ -29,6 +29,7 @@ use crate::{
         types::{container::ContainerDetailsCache, log::ContainerLookupCache},
     },
     state::AppState,
+    agent::discovery::AgentDiscovery,
 };
 
 // Combined state for axum router
@@ -68,6 +69,26 @@ async fn main() -> Result<()> {
     state.initialize()
         .await
         .context("Failed to initialize application state")?;
+
+    // Start Swarm-based agent discovery (if enabled)
+    if config.discovery.swarm_discovery {
+        let discovery = AgentDiscovery::new(
+            state.agent_pool.clone(),
+            config.discovery.clone(),
+            state.shutdown_tx.subscribe(),
+        );
+        tokio::spawn(async move {
+            discovery.start_swarm_discovery().await;
+        });
+        info!("✓ Swarm agent discovery enabled (label={}, interval={}s)",
+            config.discovery.discovery_label,
+            config.discovery.discovery_interval_secs,
+        );
+    }
+
+    if config.discovery.registration_enabled {
+        info!("✓ Agent registration API enabled at POST /api/agents/register");
+    }
 
     // Build GraphQL schema
     let schema = build_schema(state.clone());
@@ -137,6 +158,24 @@ fn build_router(state: RouterState) -> Router {
     // Request timeout from config (applies to all non-streaming routes)
     let request_timeout = Duration::from_secs(state.app_state.config.server.write_timeout_secs);
 
+    // Shell / Exec WebSocket endpoint (uses its own AppState)
+    let shell_router = Router::new()
+        .route("/shell", get(graphql::shell_ws::shell_ws_handler))
+        .with_state(state.app_state.clone());
+
+    // Agent registration API — only mount when registration is enabled.
+    // When disabled, none of the /api/agents endpoints are reachable,
+    // preventing leakage of internal agent metadata.
+    let api_router = if state.app_state.config.discovery.registration_enabled {
+        Router::new()
+            .route("/api/agents/register", post(register_agent_handler))
+            .route("/api/agents/{id}", delete(deregister_agent_handler))
+            .route("/api/agents", get(list_agents_handler))
+            .with_state(state.app_state.clone())
+    } else {
+        Router::new().with_state(state.app_state.clone())
+    };
+
     Router::new()
         // Health endpoints (no body limit needed)
         .route("/health", get(health_handler))
@@ -150,6 +189,12 @@ fn build_router(state: RouterState) -> Router {
         
         // Root endpoint
         .route("/", get(root_handler))
+        
+        // Shell WebSocket endpoint (uses AppState directly)
+        .merge(shell_router)
+        
+        // Agent registration API
+        .merge(api_router)
         
         .layer(
             ServiceBuilder::new()
@@ -263,6 +308,204 @@ async fn readiness_handler(
             }
         })),
     )
+}
+
+// ============================================================================
+// Agent Registration API Handlers
+// ============================================================================
+
+/// Agent registration request body
+#[derive(serde::Deserialize)]
+struct RegisterAgentRequest {
+    /// Unique agent ID
+    id: String,
+    /// Human-readable name
+    name: String,
+    /// gRPC address (host:port)
+    address: String,
+    /// TLS certificate PEM path (optional, falls back to discovery config)
+    tls_cert: Option<String>,
+    /// TLS key PEM path (optional)
+    tls_key: Option<String>,
+    /// TLS CA PEM path (optional)
+    tls_ca: Option<String>,
+    /// TLS domain override (optional)
+    tls_domain: Option<String>,
+    /// Optional labels
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+}
+
+/// POST /api/agents/register — register a new agent dynamically
+async fn register_agent_handler(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterAgentRequest>,
+) -> impl IntoResponse {
+    if !state.config.discovery.registration_enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "Agent registration is disabled. Set discovery.registration_enabled = true in cluster.toml"
+            })),
+        );
+    }
+
+    // Check if agent already exists
+    if state.agent_pool.get_agent(&body.id).is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("Agent '{}' already registered", body.id),
+                "agent_id": body.id,
+            })),
+        );
+    }
+
+    // Resolve TLS credentials: request body → discovery config → error
+    let tls_cert = body.tls_cert
+        .or_else(|| state.config.discovery.tls_cert.clone())
+        .unwrap_or_default();
+    let tls_key = body.tls_key
+        .or_else(|| state.config.discovery.tls_key.clone())
+        .unwrap_or_default();
+    let tls_ca = body.tls_ca
+        .or_else(|| state.config.discovery.tls_ca.clone())
+        .unwrap_or_default();
+    let tls_domain = body.tls_domain
+        .unwrap_or_else(|| state.config.discovery.tls_domain.clone());
+
+    if tls_cert.is_empty() || tls_key.is_empty() || tls_ca.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "TLS credentials required. Provide tls_cert/tls_key/tls_ca in request body or configure discovery.tls_cert/tls_key/tls_ca in cluster.toml"
+            })),
+        );
+    }
+
+    let mut labels = body.labels;
+    labels.insert("discovery.source".to_string(), "registered".to_string());
+
+    let agent_config = crate::config::AgentConfig {
+        id: body.id.clone(),
+        name: body.name.clone(),
+        address: body.address.clone(),
+        tls_cert,
+        tls_key,
+        tls_ca,
+        tls_domain,
+        labels,
+    };
+
+    match state.agent_pool.add_dynamic_agent(agent_config, crate::agent::AgentSource::Registered).await {
+        Ok(_) => {
+            info!("Agent registered via API: {} ({})", body.name, body.id);
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "status": "registered",
+                    "agent_id": body.id,
+                    "name": body.name,
+                    "address": body.address,
+                })),
+            )
+        }
+        Err(e) => {
+            warn!("Failed to register agent {}: {}", body.id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to register agent: {}", e),
+                    "agent_id": body.id,
+                })),
+            )
+        }
+    }
+}
+
+/// DELETE /api/agents/:id — deregister a dynamic agent
+async fn deregister_agent_handler(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    if !state.config.discovery.registration_enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "Agent registration API is disabled"
+            })),
+        );
+    }
+
+    // Check if agent exists
+    let conn = state.agent_pool.get_agent(&agent_id);
+    match conn {
+        Some(c) => {
+            // Don't allow removing static agents via API
+            if c.source == crate::agent::AgentSource::Static {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "Cannot deregister a static agent. Remove it from cluster.toml instead.",
+                        "agent_id": agent_id,
+                    })),
+                );
+            }
+
+            state.agent_pool.remove_agent(&agent_id);
+            info!("Agent deregistered via API: {}", agent_id);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "deregistered",
+                    "agent_id": agent_id,
+                })),
+            )
+        }
+        None => {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Agent '{}' not found", agent_id),
+                })),
+            )
+        }
+    }
+}
+
+/// GET /api/agents — list all agents with their source and status
+async fn list_agents_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let agents = state.agent_pool.list_agents();
+    let mut result = Vec::new();
+
+    for conn in &agents {
+        let source = match conn.source {
+            crate::agent::AgentSource::Static => "static",
+            crate::agent::AgentSource::Discovered => "discovered",
+            crate::agent::AgentSource::Registered => "registered",
+        };
+
+        result.push(json!({
+            "id": conn.info.id,
+            "name": conn.info.name,
+            "address": conn.info.address,
+            "source": source,
+            "status": format!("{:?}", conn.health_status()),
+            "labels": conn.info.labels,
+        }));
+    }
+
+    Json(json!({
+        "agents": result,
+        "total": result.len(),
+        "discovery": {
+            "swarm_discovery": state.config.discovery.swarm_discovery,
+            "registration_enabled": state.config.discovery.registration_enabled,
+            "discovery_label": state.config.discovery.discovery_label,
+        }
+    }))
 }
 
 /// GraphQL query handler

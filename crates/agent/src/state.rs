@@ -1,5 +1,7 @@
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use crate::docker::client::DockerClient;
 use crate::docker::inventory::ContainerInfo;
 use crate::config::AgentConfig;
@@ -12,6 +14,8 @@ pub struct AgentState {
     pub config: AgentConfig,
     pub metrics: Arc<ParsingMetrics>,
     pub parser_cache: Arc<ParserCache>,
+    /// In-memory storage for deployed compose stack files (stack_name → YAML)
+    pub stack_files: Mutex<HashMap<String, String>>,
 }
 
 impl AgentState {
@@ -22,6 +26,7 @@ impl AgentState {
             config,
             metrics: Arc::new(ParsingMetrics::new()),
             parser_cache: Arc::new(ParserCache::new()),
+            stack_files: Mutex::new(HashMap::new()),
         }
     }
 }

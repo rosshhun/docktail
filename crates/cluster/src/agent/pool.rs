@@ -19,6 +19,17 @@ pub enum HealthStatus {
     Degraded = 3,  // Partial functionality - success rate degraded but not critical
 }
 
+/// How this agent was added to the pool
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSource {
+    /// Manually configured in cluster.toml
+    Static,
+    /// Discovered via Swarm node labels
+    Discovered,
+    /// Registered via HTTP API
+    Registered,
+}
+
 impl From<u8> for HealthStatus {
     fn from(value: u8) -> Self {
         match value {
@@ -56,6 +67,7 @@ impl AgentInfo {
 pub struct AgentConnection {
     pub info: AgentInfo,
     pub client: Arc<Mutex<AgentGrpcClient>>,
+    pub source: AgentSource,
     health_status: Arc<AtomicU8>,
     last_seen: Arc<RwLock<Instant>>,
 }
@@ -221,9 +233,23 @@ impl AgentPool {
         Ok(())
     }
 
-    /// Add a new agent to the pool
+    /// Add a new agent to the pool (static agents from config)
     pub async fn add_agent(&self, config: AgentConfig) -> Result<()> {
-        debug!("Adding agent: {} ({})", config.name, config.id);
+        self.add_agent_with_source(config, AgentSource::Static).await
+    }
+
+    /// Add a dynamically discovered or registered agent
+    pub async fn add_dynamic_agent(&self, config: AgentConfig, source: AgentSource) -> Result<()> {
+        if self.connections.contains_key(&config.id) {
+            debug!("Agent {} already in pool, skipping", config.id);
+            return Ok(());
+        }
+        self.add_agent_with_source(config, source).await
+    }
+
+    /// Internal: add agent with a specific source
+    async fn add_agent_with_source(&self, config: AgentConfig, source: AgentSource) -> Result<()> {
+        debug!("Adding agent: {} ({}) source={:?}", config.name, config.id, source);
 
         // Create mTLS channel
         let channel = self.create_channel(&config).await?;
@@ -232,6 +258,7 @@ impl AgentPool {
         let connection = Arc::new(AgentConnection {
             info: AgentInfo::from_config(&config),
             client: Arc::new(Mutex::new(client)),
+            source,
             health_status: Arc::new(AtomicU8::new(HealthStatus::Unknown as u8)),
             last_seen: Arc::new(RwLock::new(Instant::now())),
         });
@@ -248,7 +275,6 @@ impl AgentPool {
     }
 
     /// Remove an agent from the pool
-    #[allow(dead_code)]
     pub fn remove_agent(&self, agent_id: &str) -> Option<Arc<AgentConnection>> {
         let removed = self.connections.remove(agent_id).map(|(_, conn)| conn);
         if let Some(ref conn) = removed {
@@ -270,7 +296,14 @@ impl AgentPool {
         let config = match agent_config {
             Some(c) => c,
             None => {
-                debug!("Agent {} is not a static agent, skipping reconnect", agent_id);
+                // For dynamic agents, skip reconnect (they will be re-discovered or re-registered)
+                if let Some(conn) = self.connections.get(agent_id) {
+                    if conn.source != AgentSource::Static {
+                        debug!("Agent {} is dynamic ({:?}), skipping reconnect", agent_id, conn.source);
+                        return Ok(());
+                    }
+                }
+                debug!("Agent {} config not found, skipping reconnect", agent_id);
                 return Ok(());
             }
         };

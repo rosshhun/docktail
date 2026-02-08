@@ -97,3 +97,39 @@ output = "stdout"
 enable_graphiql = false  # Enable in development only (set to true when needed)
 max_depth = 15
 max_complexity = 1000
+
+# ============================================================================
+# Agent Auto-Discovery Configuration
+# ============================================================================
+# Docktail supports three ways to add agents:
+#   1. Static: manually configured in [[agents.static_agents]] above
+#   2. Swarm Discovery: auto-discover agents via Docker Swarm node labels
+#   3. HTTP Registration: agents self-register via POST /api/agents/register
+
+[discovery]
+# Enable Swarm-aware auto-discovery
+# When enabled, the cluster periodically queries the Swarm /nodes API
+# and auto-connects to nodes labeled with the discovery_label
+swarm_discovery = false
+
+# Node label to identify Swarm nodes running docktail agents
+# Format: "key=value" — nodes with this label will be auto-discovered
+discovery_label = "docktail.agent=true"
+
+# How often to scan for new agents (seconds)
+discovery_interval_secs = 30
+
+# Default gRPC port for discovered agents
+agent_port = 50051
+
+# Enable the HTTP agent registration API
+# When true, agents can self-register via POST /api/agents/register
+# and be removed via DELETE /api/agents/{id}
+registration_enabled = false
+
+# Shared TLS credentials for discovered/registered agents
+# These are used when the agent doesn't provide its own TLS paths
+# tls_cert = "/etc/docktail/certs/client.crt"
+# tls_key = "/etc/docktail/certs/client.key"
+# tls_ca = "/etc/docktail/certs/ca.crt"
+# tls_domain = "localhost"

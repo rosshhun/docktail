@@ -1,5 +1,5 @@
 use async_graphql::{SimpleObject, Enum};
-use crate::agent::HealthStatus as AgentHealthStatus;
+use crate::agent::{HealthStatus as AgentHealthStatus, AgentSource};
 use std::sync::Arc;
 
 /// Agent status in GraphQL
@@ -22,6 +22,27 @@ impl From<AgentHealthStatus> for AgentStatus {
     }
 }
 
+/// How the agent was added to the cluster
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum AgentSourceGql {
+    /// Manually configured in cluster.toml
+    Static,
+    /// Auto-discovered via Swarm node labels
+    Discovered,
+    /// Registered via HTTP API
+    Registered,
+}
+
+impl From<AgentSource> for AgentSourceGql {
+    fn from(source: AgentSource) -> Self {
+        match source {
+            AgentSource::Static => AgentSourceGql::Static,
+            AgentSource::Discovered => AgentSourceGql::Discovered,
+            AgentSource::Registered => AgentSourceGql::Registered,
+        }
+    }
+}
+
 /// Label (key-value pair)
 #[derive(Debug, Clone, SimpleObject)]
 pub struct Label {
@@ -36,6 +57,7 @@ pub fn agent_view_from_connection(conn: &Arc<crate::agent::AgentConnection>, las
         name: conn.info.name.clone(),
         address: conn.info.address.clone(),
         status: conn.health_status().into(),
+        source: conn.source.into(),
         last_seen,
         labels: conn.info.labels.iter().map(|(k, v)| Label {
             key: k.clone(),
@@ -52,6 +74,8 @@ pub struct AgentView {
     pub name: String,
     pub address: String,
     pub status: AgentStatus,
+    /// How this agent was added (static config, discovered, or registered)
+    pub source: AgentSourceGql,
     pub last_seen: chrono::DateTime<chrono::Utc>,
     pub labels: Vec<Label>,
     pub version: Option<String>,
@@ -65,6 +89,29 @@ pub struct AgentHealthSummary {
     pub degraded: i32,
     pub unhealthy: i32,
     pub unknown: i32,
+}
+
+/// Agent discovery status
+#[derive(Debug, Clone, SimpleObject)]
+pub struct DiscoveryStatusView {
+    /// Whether Swarm-aware auto-discovery is enabled
+    pub swarm_discovery_enabled: bool,
+    /// Whether the HTTP registration API is enabled
+    pub registration_enabled: bool,
+    /// Node label used for Swarm discovery
+    pub discovery_label: String,
+    /// Discovery polling interval (seconds)
+    pub discovery_interval_secs: i32,
+    /// Default agent gRPC port for discovered agents
+    pub agent_port: i32,
+    /// Total agents in pool
+    pub total_agents: i32,
+    /// Agents from static config
+    pub static_agents: i32,
+    /// Agents from Swarm discovery
+    pub discovered_agents: i32,
+    /// Agents from HTTP registration
+    pub registered_agents: i32,
 }
 
 /// Real-time agent health event (for subscriptions)

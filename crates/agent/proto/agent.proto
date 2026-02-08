@@ -61,6 +61,18 @@ message NormalizedLogEntry {
   repeated LogLine grouped_lines = 10;   // Continuation lines (empty if not grouped)
   uint32 line_count = 11;                // Total lines (1 = single line)
   bool is_grouped = 12;                  // Quick check for UI
+
+  // Swarm context (only populated for service-level log streams)
+  optional SwarmContext swarm_context = 13;
+}
+
+// Swarm context for service log entries — identifies which task/node produced the log
+message SwarmContext {
+  string service_id = 1;
+  string service_name = 2;
+  string task_id = 3;
+  uint64 task_slot = 4;
+  string node_id = 5;
 }
 
 // Individual log line within a multiline group
@@ -543,12 +555,10 @@ message BlockIoDeviceStats {
 }
 
 // ============================================================================
-// CONTROL SERVICE (Future Implementation - Stub)
+// CONTROL SERVICE
 // ============================================================================
 // Purpose: Container lifecycle management (start/stop/restart/remove)
 // Security: Requires RBAC - only admin role can execute
-// Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED 
-// TODO: Needs Implementation
 
 service ControlService {
   // Start a stopped container
@@ -568,6 +578,27 @@ service ControlService {
   
   // Remove a container (requires force flag if running)
   rpc RemoveContainer(ContainerRemoveRequest) returns (ContainerControlResponse);
+
+  // Pull an image from a registry
+  rpc PullImage(PullImageRequest) returns (PullImageResponse);
+
+  // Remove an image
+  rpc RemoveImage(RemoveImageRequest) returns (RemoveImageResponse);
+
+  // Create a volume
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+
+  // Remove a volume
+  rpc RemoveVolume(RemoveVolumeRequest) returns (RemoveVolumeResponse);
+
+  // Create a network
+  rpc CreateNetwork(CreateNetworkRequest) returns (CreateNetworkResponse);
+
+  // Remove a network
+  rpc RemoveNetwork(RemoveNetworkRequest) returns (RemoveNetworkResponse);
+
+  // Stream Docker engine events (containers, images, volumes, networks, etc.)
+  rpc StreamDockerEvents(DockerEventsRequest) returns (stream DockerEvent);
 }
 
 message ContainerControlRequest {
@@ -609,7 +640,6 @@ message ContainerControlResponse {
 // Purpose: Interactive shell access to containers (like `docker exec -it`)
 // Security: Requires RBAC + audit logging
 // Status: UNIMPLEMENTED - Will return NOT_IMPLEMENTED error
-// TODO: Needs Implementation
 
 service ShellService {
   // Open an interactive shell (bidirectional stream)
@@ -745,4 +775,1310 @@ enum ErrorCode {
   ERROR_CODE_STREAM_CLOSED = 6;
   ERROR_CODE_RATE_LIMIT_EXCEEDED = 7;
   ERROR_CODE_UNSUPPORTED_OPERATION = 8;
+}
+
+// ============================================================================
+// SWARM SERVICE — Docker Swarm detection, node listing, service/task discovery
+// ============================================================================
+
+service SwarmService {
+  // Check if swarm mode is active and get swarm info
+  rpc GetSwarmInfo(SwarmInfoRequest) returns (SwarmInfoResponse);
+
+  // List all nodes in the swarm
+  rpc ListNodes(NodeListRequest) returns (NodeListResponse);
+
+  // List all swarm services
+  rpc ListServices(ServiceListRequest) returns (ServiceListResponse);
+
+  // Inspect a specific swarm service
+  rpc InspectService(ServiceInspectRequest) returns (ServiceInspectResponse);
+
+  // List tasks in the swarm (optionally filtered by service)
+  rpc ListTasks(TaskListRequest) returns (TaskListResponse);
+
+  // Stream aggregated logs from all tasks of a service (S3)
+  rpc StreamServiceLogs(ServiceLogStreamRequest) returns (stream NormalizedLogEntry);
+
+  // Create a swarm service (for stack/compose deployment)
+  rpc CreateService(CreateServiceRequest) returns (CreateServiceResponse);
+
+  // Delete a swarm service
+  rpc DeleteService(DeleteServiceRequest) returns (DeleteServiceResponse);
+
+  // Update a swarm service (scaling, image update, etc.)
+  rpc UpdateService(UpdateServiceRequest) returns (UpdateServiceResponse);
+
+  // List swarm/overlay networks with service attachment info (S5)
+  rpc ListSwarmNetworks(SwarmNetworkListRequest) returns (SwarmNetworkListResponse);
+
+  // Inspect a single swarm network with full detail (S5)
+  rpc InspectSwarmNetwork(SwarmNetworkInspectRequest) returns (SwarmNetworkInspectResponse);
+
+  // Stream rolling update progress for a service (S6)
+  rpc ServiceUpdateStream(ServiceUpdateStreamRequest) returns (stream ServiceUpdateEvent);
+
+  // List all swarm secrets (metadata only, never exposes secret data) (S8)
+  rpc ListSecrets(SecretListRequest) returns (SecretListResponse);
+
+  // List all swarm configs (metadata only, data omitted by default) (S8)
+  rpc ListConfigs(ConfigListRequest) returns (ConfigListResponse);
+
+  // Inspect a single node by ID (S9)
+  rpc InspectNode(NodeInspectRequest) returns (NodeInspectResponse);
+
+  // Update node availability/role/labels (S9)
+  rpc UpdateNode(NodeUpdateRequest) returns (NodeUpdateResponse);
+
+  // Stream node state changes — drain events, node failures, availability changes (S9)
+  rpc NodeEventStream(NodeEventStreamRequest) returns (stream NodeEvent);
+
+  // Stream service scaling / lifecycle events (S10)
+  rpc ServiceEventStream(ServiceEventStreamRequest) returns (stream ServiceEvent);
+
+  // Get coverage info for a global service (which nodes have tasks, which don't) (S10)
+  rpc GetServiceCoverage(ServiceCoverageRequest) returns (ServiceCoverageResponse);
+
+  // Get aggregated health for all services in a stack (S11)
+  rpc GetStackHealth(StackHealthRequest) returns (StackHealthResponse);
+
+  // Stream service restart events — task restarts, crash loops (S11)
+  rpc ServiceRestartEventStream(ServiceRestartEventStreamRequest) returns (stream ServiceRestartEvent);
+
+  // Rollback a service to its previous version (B06)
+  rpc RollbackService(RollbackServiceRequest) returns (RollbackServiceResponse);
+
+  // Create a swarm secret (B08)
+  rpc CreateSecret(CreateSecretRequest) returns (CreateSecretResponse);
+
+  // Delete a swarm secret (B08)
+  rpc DeleteSecret(DeleteSecretRequest) returns (DeleteSecretResponse);
+
+  // Create a swarm config (B09)
+  rpc CreateConfig(CreateConfigRequest) returns (CreateConfigResponse);
+
+  // Delete a swarm config (B09)
+  rpc DeleteConfig(DeleteConfigRequest) returns (DeleteConfigResponse);
+
+  // Initialize a new swarm (B04)
+  rpc SwarmInit(SwarmInitRequest) returns (SwarmInitResponse);
+
+  // Join an existing swarm (B04)
+  rpc SwarmJoin(SwarmJoinRequest) returns (SwarmJoinResponse);
+
+  // Leave the swarm (B04)
+  rpc SwarmLeave(SwarmLeaveRequest) returns (SwarmLeaveResponse);
+
+  // Remove a node from the swarm (B07)
+  rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
+
+  // Connect a container to a network (B14)
+  rpc NetworkConnect(NetworkConnectRequest) returns (NetworkConnectResponse);
+
+  // Disconnect a container from a network (B14)
+  rpc NetworkDisconnect(NetworkDisconnectRequest) returns (NetworkDisconnectResponse);
+
+  // Stream logs from a single task (B02)
+  rpc StreamTaskLogs(TaskLogStreamRequest) returns (stream NormalizedLogEntry);
+
+  // Inspect a single task with full details (B03)
+  rpc InspectTask(TaskInspectRequest) returns (TaskInspectResponse);
+
+  // Update swarm settings (B05)
+  rpc SwarmUpdate(SwarmUpdateRequest) returns (SwarmUpdateResponse);
+
+  // Get swarm unlock key (B05)
+  rpc SwarmUnlockKey(SwarmUnlockKeyRequest) returns (SwarmUnlockKeyResponse);
+
+  // Unlock the swarm (B05)
+  rpc SwarmUnlock(SwarmUnlockRequest) returns (SwarmUnlockResponse);
+
+  // Deploy a stack from compose YAML (B11)
+  rpc DeployComposeStack(DeployComposeStackRequest) returns (DeployComposeStackResponse);
+
+  // Get the stored compose YAML for a stack (B12)
+  rpc GetStackFile(GetStackFileRequest) returns (GetStackFileResponse);
+}
+
+// --- Service Log Streaming (S3) ---
+
+message ServiceLogStreamRequest {
+  // Service ID or name
+  string service_id = 1;
+  
+  // Follow mode (like `tail -f`) — keep streaming new logs
+  bool follow = 2;
+  
+  // Number of lines to show from the end
+  optional uint32 tail_lines = 3;
+  
+  // Time-travel: Unix timestamp to start from
+  optional int64 since = 4;
+  
+  // Time-travel: Unix timestamp to stop at
+  optional int64 until = 5;
+  
+  // Show timestamps in output
+  bool timestamps = 6;
+}
+
+// --- Swarm Info ---
+
+message SwarmInfoRequest {}
+
+message SwarmInfoResponse {
+  bool is_swarm_mode = 1;
+  optional SwarmInfo swarm = 2;
+}
+
+message SwarmInfo {
+  string swarm_id = 1;
+  string node_id = 2;
+  string node_addr = 3;
+  bool is_manager = 4;
+  uint32 managers = 5;
+  uint32 workers = 6;
+  int64 created_at = 7;
+  int64 updated_at = 8;
+}
+
+// --- Node ---
+
+message NodeListRequest {}
+
+message NodeListResponse {
+  repeated NodeInfo nodes = 1;
+}
+
+message NodeInfo {
+  string id = 1;
+  string hostname = 2;
+  NodeRole role = 3;
+  NodeAvailability availability = 4;
+  NodeState status = 5;
+  string addr = 6;
+  string engine_version = 7;
+  string os = 8;
+  string architecture = 9;
+  map<string, string> labels = 10;
+  optional ManagerStatus manager_status = 11;
+  int64 nano_cpus = 12;
+  int64 memory_bytes = 13;
+}
+
+enum NodeRole {
+  NODE_ROLE_UNKNOWN = 0;
+  NODE_ROLE_MANAGER = 1;
+  NODE_ROLE_WORKER = 2;
+}
+
+enum NodeAvailability {
+  NODE_AVAILABILITY_UNKNOWN = 0;
+  NODE_AVAILABILITY_ACTIVE = 1;
+  NODE_AVAILABILITY_PAUSE = 2;
+  NODE_AVAILABILITY_DRAIN = 3;
+}
+
+enum NodeState {
+  NODE_STATE_UNKNOWN = 0;
+  NODE_STATE_READY = 1;
+  NODE_STATE_DOWN = 2;
+  NODE_STATE_DISCONNECTED = 3;
+}
+
+message ManagerStatus {
+  bool leader = 1;
+  string reachability = 2;
+  string addr = 3;
+}
+
+// --- Service ---
+
+message ServiceListRequest {}
+
+message ServiceListResponse {
+  repeated ServiceInfo services = 1;
+}
+
+message ServiceInspectRequest {
+  string service_id = 1;
+}
+
+message ServiceInspectResponse {
+  optional ServiceInfo service = 1;
+}
+
+message ServiceInfo {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  ServiceMode mode = 4;
+  uint64 replicas_desired = 5;
+  uint64 replicas_running = 6;
+  map<string, string> labels = 7;
+  optional string stack_namespace = 8;
+  int64 created_at = 9;
+  int64 updated_at = 10;
+  repeated ServicePort ports = 11;
+  optional UpdateStatus update_status = 12;
+  repeated string placement_constraints = 13;
+  repeated string networks = 14;
+  // S5: Virtual IP assignments per network
+  repeated VirtualIp virtual_ips = 15;
+  // S6: Rolling update & rollback configuration
+  optional UpdateConfig update_config = 16;
+  optional UpdateConfig rollback_config = 17;
+  // S6: Placement constraints, preferences, platforms
+  optional ServicePlacement placement = 18;
+  // S8: Secret and config references attached to this service
+  repeated SecretReferenceInfo secret_references = 19;
+  repeated ConfigReferenceInfo config_references = 20;
+  // S11: Restart policy from task template
+  optional SwarmRestartPolicy restart_policy = 21;
+}
+
+// Virtual IP assignment for a service on a specific network
+message VirtualIp {
+  string network_id = 1;
+  string addr = 2;
+}
+
+enum ServiceMode {
+  SERVICE_MODE_UNKNOWN = 0;
+  SERVICE_MODE_REPLICATED = 1;
+  SERVICE_MODE_GLOBAL = 2;
+  SERVICE_MODE_REPLICATED_JOB = 3;
+  SERVICE_MODE_GLOBAL_JOB = 4;
+}
+
+message ServicePort {
+  string protocol = 1;
+  uint32 target_port = 2;
+  uint32 published_port = 3;
+  string publish_mode = 4;
+}
+
+message UpdateStatus {
+  string state = 1;
+  optional int64 started_at = 2;
+  optional int64 completed_at = 3;
+  string message = 4;
+}
+
+// --- Task ---
+
+message TaskListRequest {
+  // Optional: filter by service ID
+  optional string service_id = 1;
+}
+
+message TaskListResponse {
+  repeated TaskInfo tasks = 1;
+}
+
+message TaskInfo {
+  string id = 1;
+  string service_id = 2;
+  string node_id = 3;
+  optional uint64 slot = 4;
+  optional string container_id = 5;
+  string state = 6;
+  string desired_state = 7;
+  string status_message = 8;
+  optional string status_err = 9;
+  int64 created_at = 10;
+  int64 updated_at = 11;
+  optional int32 exit_code = 12;
+  // S6: Service name for display without cross-lookup
+  string service_name = 13;
+}
+
+// ============================================================================
+// SERVICE MANAGEMENT — Create / Delete / Update swarm services (M6 Compose)
+// ============================================================================
+
+message CreateServiceRequest {
+  // Service name
+  string name = 1;
+  // Container image
+  string image = 2;
+  // Replicas (0 = global mode)
+  uint64 replicas = 3;
+  // Whether to use global mode instead of replicated
+  bool global = 4;
+  // Port mappings
+  repeated ServicePortConfig ports = 5;
+  // Environment variables
+  map<string, string> env = 6;
+  // Labels (including com.docker.stack.namespace for stacks)
+  map<string, string> labels = 7;
+  // Networks to attach
+  repeated string networks = 8;
+  // Command override
+  repeated string command = 9;
+  // Placement constraints (e.g., "node.role==manager")
+  repeated string constraints = 10;
+  // Resource limits (B13)
+  optional ServiceResourceLimits resource_limits = 11;
+  // Resource reservations (B13)
+  optional ServiceResourceReservations resource_reservations = 12;
+  // Volume/bind mounts (B13)
+  repeated ServiceMount mounts = 13;
+  // Restart policy (B13)
+  optional ServiceRestartPolicy restart_policy = 14;
+  // Update config for rolling updates (B13)
+  optional ServiceUpdateConfig update_config = 15;
+  // Rollback config (B13)
+  optional ServiceUpdateConfig rollback_config = 16;
+  // Secret references (B13)
+  repeated ServiceSecretReference secrets = 17;
+  // Config references (B13)
+  repeated ServiceConfigReference configs = 18;
+  // Health check (B13)
+  optional ServiceHealthCheck health_check = 19;
+  // Registry auth (base64-encoded JSON, B10)
+  string registry_auth = 20;
+  // Log driver name (e.g., "json-file", "syslog")
+  string log_driver = 21;
+  // Log driver options
+  map<string, string> log_driver_opts = 22;
+}
+
+message ServicePortConfig {
+  uint32 target_port = 1;
+  uint32 published_port = 2;
+  string protocol = 3;      // tcp, udp
+  string publish_mode = 4;  // ingress, host
+}
+
+message CreateServiceResponse {
+  string service_id = 1;
+  bool success = 2;
+  string message = 3;
+}
+
+message DeleteServiceRequest {
+  string service_id = 1;
+}
+
+message DeleteServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UpdateServiceRequest {
+  string service_id = 1;
+  // Fields to update (only set fields will be applied)
+  optional string image = 2;
+  optional uint64 replicas = 3;
+  // Force update (triggers re-deployment even if config unchanged)
+  bool force = 4;
+  // Environment variables (replaces all if set)
+  map<string, string> env = 5;
+  // Labels (replaces all if set)
+  map<string, string> labels = 6;
+  // Networks (replaces all if set)
+  repeated string networks = 7;
+  // Port mappings (replaces all if set)
+  repeated ServicePortConfig ports = 8;
+  // Resource limits (B13)
+  optional ServiceResourceLimits resource_limits = 9;
+  // Resource reservations (B13)
+  optional ServiceResourceReservations resource_reservations = 10;
+  // Volume/bind mounts (replaces all if set, B13)
+  repeated ServiceMount mounts = 11;
+  // Restart policy (B13)
+  optional ServiceRestartPolicy restart_policy = 12;
+  // Update config (B13)
+  optional ServiceUpdateConfig update_config = 13;
+  // Rollback config (B13)
+  optional ServiceUpdateConfig rollback_config = 14;
+  // Placement constraints (replaces all if set)
+  repeated string constraints = 15;
+  // Command override (replaces all if set)
+  repeated string command = 16;
+  // Registry auth (base64-encoded JSON, B10)
+  string registry_auth = 17;
+
+  // Explicit clear flags — when true, the corresponding field is set to empty
+  // even if the map/list above is empty. This allows callers to remove all
+  // env vars, labels, networks, ports, mounts, constraints, or commands.
+  bool clear_env = 18;
+  bool clear_labels = 19;
+  bool clear_networks = 20;
+  bool clear_ports = 21;
+  bool clear_mounts = 22;
+  bool clear_constraints = 23;
+  bool clear_command = 24;
+}
+
+message UpdateServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// S5: SWARM NETWORKING & OVERLAY VISIBILITY
+// ============================================================================
+
+message SwarmNetworkListRequest {
+  // If true, only return swarm-scoped networks (overlay, ingress)
+  bool swarm_only = 1;
+}
+
+message SwarmNetworkListResponse {
+  repeated SwarmNetworkInfo networks = 1;
+}
+
+message SwarmNetworkInspectRequest {
+  string network_id = 1;
+}
+
+message SwarmNetworkInspectResponse {
+  optional SwarmNetworkInfo network = 1;
+}
+
+message SwarmNetworkInfo {
+  string id = 1;
+  string name = 2;
+  string driver = 3;              // overlay, bridge, macvlan, etc.
+  string scope = 4;               // swarm, local
+  bool is_internal = 5;
+  bool is_attachable = 6;
+  bool is_ingress = 7;
+  bool enable_ipv6 = 8;
+  int64 created_at = 9;
+  map<string, string> labels = 10;
+  map<string, string> options = 11;
+  // IPAM configuration
+  repeated IpamConfigEntry ipam_configs = 12;
+  // Overlay peer nodes
+  repeated NetworkPeerInfo peers = 13;
+  // Services attached to this network with their VIPs
+  repeated NetworkServiceAttachment service_attachments = 14;
+}
+
+message IpamConfigEntry {
+  optional string subnet = 1;
+  optional string gateway = 2;
+  optional string ip_range = 3;
+}
+
+message NetworkPeerInfo {
+  string name = 1;  // Peer node name/ID
+  string ip = 2;    // Peer IP address
+}
+
+message NetworkServiceAttachment {
+  string service_id = 1;
+  string service_name = 2;
+  string virtual_ip = 3;    // VIP address on this network
+}
+
+// ============================================================================
+// S6: SWARM ORCHESTRATION OBSERVABILITY
+// ============================================================================
+
+// Update / rollback configuration (shared shape for both)
+message UpdateConfig {
+  uint64 parallelism = 1;       // Tasks updated per batch (0 = unlimited)
+  int64 delay_ns = 2;           // Delay between batches (nanoseconds)
+  string failure_action = 3;    // "pause", "continue", "rollback"
+  int64 monitor_ns = 4;         // Time to watch each task for failure (ns)
+  double max_failure_ratio = 5; // e.g. 0.1 = 10% allowed failures
+  string order = 6;             // "stop-first" or "start-first"
+}
+
+// Service placement configuration
+message ServicePlacement {
+  repeated string constraints = 1;
+  repeated PlacementPreference preferences = 2;
+  optional uint64 max_replicas_per_node = 3;
+  repeated Platform platforms = 4;
+}
+
+message PlacementPreference {
+  string spread_descriptor = 1; // e.g. "engine.labels.az"
+}
+
+message Platform {
+  string architecture = 1;     // e.g. "amd64"
+  string os = 2;               // e.g. "linux"
+}
+
+// Rolling update stream
+message ServiceUpdateStreamRequest {
+  string service_id = 1;
+  // Poll interval in milliseconds (default: 1000)
+  optional uint64 poll_interval_ms = 2;
+}
+
+message ServiceUpdateEvent {
+  // Snapshot of current update status
+  string update_state = 1;          // updating, paused, completed, rollback_started, etc.
+  optional int64 started_at = 2;
+  optional int64 completed_at = 3;
+  string message = 4;
+
+  // Task breakdown at this point in time
+  uint64 tasks_total = 5;
+  uint64 tasks_running = 6;
+  uint64 tasks_ready = 7;
+  uint64 tasks_failed = 8;
+  uint64 tasks_shutdown = 9;
+
+  // Timestamp of this snapshot
+  int64 snapshot_at = 10;
+
+  // Recent task state changes (tasks updated since last poll)
+  repeated TaskStateChange recent_changes = 11;
+}
+
+message TaskStateChange {
+  string task_id = 1;
+  string service_id = 2;
+  string node_id = 3;
+  optional uint64 slot = 4;
+  string state = 5;             // current state
+  string desired_state = 6;
+  string message = 7;
+  optional string error = 8;
+  int64 updated_at = 9;
+}
+
+// ============================================================================
+// S8: SWARM SECRETS & CONFIGS (METADATA ONLY)
+// ============================================================================
+
+message SecretListRequest {}
+
+message SecretListResponse {
+  repeated SwarmSecretInfo secrets = 1;
+}
+
+message ConfigListRequest {}
+
+message ConfigListResponse {
+  repeated SwarmConfigInfo configs = 1;
+}
+
+// Metadata about a swarm secret (never includes the actual secret data)
+message SwarmSecretInfo {
+  string id = 1;
+  string name = 2;
+  int64 created_at = 3;
+  int64 updated_at = 4;
+  map<string, string> labels = 5;
+  // Driver name for external secret stores (empty if Docker-managed)
+  string driver = 6;
+}
+
+// Metadata about a swarm config (data omitted for safety)
+message SwarmConfigInfo {
+  string id = 1;
+  string name = 2;
+  int64 created_at = 3;
+  int64 updated_at = 4;
+  map<string, string> labels = 5;
+}
+
+// A secret reference attached to a service
+message SecretReferenceInfo {
+  string secret_id = 1;
+  string secret_name = 2;
+  // Mount path inside the container (e.g., "/run/secrets/my_secret")
+  string file_name = 3;
+  string file_uid = 4;
+  string file_gid = 5;
+  uint32 file_mode = 6;
+}
+
+// A config reference attached to a service
+message ConfigReferenceInfo {
+  string config_id = 1;
+  string config_name = 2;
+  // Mount path inside the container (e.g., "/my_config")
+  string file_name = 3;
+  string file_uid = 4;
+  string file_gid = 5;
+  uint32 file_mode = 6;
+}
+
+// ============================================================================
+// S9: NODE MANAGEMENT & DRAIN AWARENESS
+// ============================================================================
+
+message NodeInspectRequest {
+  string node_id = 1;
+}
+
+message NodeInspectResponse {
+  optional NodeInfo node = 1;
+}
+
+message NodeUpdateRequest {
+  string node_id = 1;
+  // New availability: "active", "pause", or "drain"
+  optional string availability = 2;
+  // New role: "worker" or "manager"
+  optional string role = 3;
+  // Labels to set (replaces all labels)
+  map<string, string> labels = 4;
+}
+
+message NodeUpdateResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message NodeEventStreamRequest {
+  // Optional: filter events to a specific node ID (empty = all nodes)
+  string node_id = 1;
+  // Polling interval in milliseconds (default: 2000)
+  uint64 poll_interval_ms = 2;
+}
+
+enum NodeEventType {
+  NODE_EVENT_UNKNOWN = 0;
+  NODE_EVENT_STATE_CHANGE = 1;       // Node status changed (ready/down/disconnected)
+  NODE_EVENT_AVAILABILITY_CHANGE = 2; // Availability changed (active/pause/drain)
+  NODE_EVENT_ROLE_CHANGE = 3;        // Role changed (worker/manager)
+  NODE_EVENT_DRAIN_STARTED = 4;      // Node entered drain mode
+  NODE_EVENT_DRAIN_COMPLETED = 5;    // All tasks migrated off drained node
+  NODE_EVENT_NODE_DOWN = 6;          // Node went down
+  NODE_EVENT_NODE_READY = 7;         // Node came back up
+}
+
+message NodeEvent {
+  string node_id = 1;
+  string hostname = 2;
+  NodeEventType event_type = 3;
+  // Previous and current values for the changed field
+  string previous_value = 4;
+  string current_value = 5;
+  // Tasks affected by this event (e.g., tasks being migrated during drain)
+  repeated TaskInfo affected_tasks = 6;
+  int64 timestamp = 7;
+}
+
+// --- S10: Global & Replicated Service Scaling Insights ---
+
+message ServiceEventStreamRequest {
+  // Service ID to monitor for scaling/lifecycle events
+  string service_id = 1;
+  // Polling interval in milliseconds (default: 2000)
+  uint64 poll_interval_ms = 2;
+}
+
+enum ServiceEventType {
+  SERVICE_EVENT_UNKNOWN = 0;
+  SERVICE_EVENT_SCALED_UP = 1;         // Replicas increased
+  SERVICE_EVENT_SCALED_DOWN = 2;       // Replicas decreased
+  SERVICE_EVENT_UPDATE_STARTED = 3;    // Rolling update started
+  SERVICE_EVENT_UPDATE_COMPLETED = 4;  // Rolling update completed
+  SERVICE_EVENT_UPDATE_ROLLED_BACK = 5;// Update was rolled back
+  SERVICE_EVENT_TASK_FAILED = 6;       // A task in this service failed
+  SERVICE_EVENT_TASK_RECOVERED = 7;    // A previously failed task recovered (new task running)
+}
+
+message ServiceEvent {
+  string service_id = 1;
+  ServiceEventType event_type = 2;
+  // Replica count change context (for SCALED_UP / SCALED_DOWN)
+  optional uint64 previous_replicas = 3;
+  optional uint64 current_replicas = 4;
+  int64 timestamp = 5;
+  string message = 6;
+  // Tasks relevant to this event (e.g., the failed task, or new tasks)
+  repeated TaskInfo affected_tasks = 7;
+}
+
+message ServiceCoverageRequest {
+  // Service ID (must be a global service)
+  string service_id = 1;
+}
+
+message ServiceCoverageResponse {
+  ServiceCoverage coverage = 1;
+}
+
+message ServiceCoverage {
+  // Node IDs that have a running task for this service
+  repeated string covered_nodes = 1;
+  // Node IDs that should have a task but don't (or task is not running)
+  repeated string uncovered_nodes = 2;
+  // Total eligible nodes in the swarm
+  uint32 total_nodes = 3;
+  // Percentage of nodes covered (0.0 – 100.0)
+  double coverage_percentage = 4;
+  // Service ID
+  string service_id = 5;
+  // Whether this is a global service
+  bool is_global = 6;
+}
+
+// --- S11: Stack-Level Health & Restart Policies ---
+
+// Swarm restart policy (from TaskSpec.restart_policy)
+message SwarmRestartPolicy {
+  // Condition: "none", "on-failure", "any"
+  string condition = 1;
+  // Delay between restart attempts in nanoseconds
+  int64 delay_ns = 2;
+  // Maximum number of restart attempts (0 = unlimited)
+  uint64 max_attempts = 3;
+  // Evaluation window in nanoseconds (0 = unbounded)
+  int64 window_ns = 4;
+}
+
+message StackHealthRequest {
+  // Stack namespace (com.docker.stack.namespace label value)
+  string namespace = 1;
+}
+
+message StackHealthResponse {
+  StackHealth health = 1;
+}
+
+message StackHealth {
+  string namespace = 1;
+  // Overall stack health
+  StackHealthStatus overall_status = 2;
+  // Per-service health breakdown
+  repeated ServiceHealth service_healths = 3;
+  // Aggregate counts
+  uint32 total_services = 4;
+  uint32 healthy_services = 5;
+  uint32 degraded_services = 6;
+  uint32 unhealthy_services = 7;
+  // Total task counts across all services
+  uint64 total_desired = 8;
+  uint64 total_running = 9;
+  uint64 total_failed = 10;
+}
+
+enum StackHealthStatus {
+  STACK_HEALTH_UNKNOWN = 0;
+  STACK_HEALTH_HEALTHY = 1;    // All services at desired replica count
+  STACK_HEALTH_DEGRADED = 2;   // Some services below desired or have failures
+  STACK_HEALTH_UNHEALTHY = 3;  // Most/all services failing
+}
+
+message ServiceHealth {
+  string service_id = 1;
+  string service_name = 2;
+  ServiceHealthStatus health_status = 3;
+  uint64 replicas_desired = 4;
+  uint64 replicas_running = 5;
+  uint64 replicas_failed = 6;
+  // Recent task failure messages (last 5)
+  repeated string recent_errors = 7;
+  // Whether a rolling update is in progress
+  bool update_in_progress = 8;
+  // Restart policy for this service
+  optional SwarmRestartPolicy restart_policy = 9;
+}
+
+enum ServiceHealthStatus {
+  SERVICE_HEALTH_UNKNOWN = 0;
+  SERVICE_HEALTH_HEALTHY = 1;    // Running == Desired, no recent failures
+  SERVICE_HEALTH_DEGRADED = 2;   // Running < Desired, or has failed tasks
+  SERVICE_HEALTH_UNHEALTHY = 3;  // No running tasks, or all failing
+}
+
+message ServiceRestartEventStreamRequest {
+  // Service ID to monitor for restart events (empty = all services in swarm)
+  string service_id = 1;
+  // Polling interval in milliseconds (default: 2000)
+  uint64 poll_interval_ms = 2;
+}
+
+enum RestartEventType {
+  RESTART_EVENT_UNKNOWN = 0;
+  RESTART_EVENT_TASK_RESTARTED = 1;  // Task was replaced by a new one in same slot
+  RESTART_EVENT_CRASH_LOOP = 2;      // Task has restarted multiple times rapidly
+  RESTART_EVENT_OOM_KILLED = 3;      // Task was killed due to OOM
+}
+
+message ServiceRestartEvent {
+  string service_id = 1;
+  string service_name = 2;
+  RestartEventType event_type = 3;
+  // The new task that replaced the old one
+  optional TaskInfo new_task = 4;
+  // The old task that was replaced
+  optional TaskInfo old_task = 5;
+  // Slot number where restart happened
+  optional uint64 slot = 6;
+  // Number of restarts in the current evaluation window
+  uint32 restart_count = 7;
+  int64 timestamp = 8;
+  string message = 9;
+}
+
+// ============================================================================
+// IMAGE / VOLUME / NETWORK MANAGEMENT (ControlService extensions)
+// ============================================================================
+
+message PullImageRequest {
+  string image = 1;
+  string tag = 2;
+  // Optional registry auth (base64-encoded JSON)
+  string registry_auth = 3;
+}
+
+message PullImageResponse {
+  bool success = 1;
+  string message = 2;
+  // Image ID if pull succeeded
+  string image_id = 3;
+}
+
+message RemoveImageRequest {
+  string image_id = 1;
+  bool force = 2;
+  bool no_prune = 3;
+}
+
+message RemoveImageResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CreateVolumeRequest {
+  string name = 1;
+  string driver = 2;
+  map<string, string> driver_opts = 3;
+  map<string, string> labels = 4;
+}
+
+message CreateVolumeResponse {
+  bool success = 1;
+  string message = 2;
+  string name = 3;
+}
+
+message RemoveVolumeRequest {
+  string name = 1;
+  bool force = 2;
+}
+
+message RemoveVolumeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CreateNetworkRequest {
+  string name = 1;
+  string driver = 2;
+  bool internal = 3;
+  bool attachable = 4;
+  bool enable_ipv6 = 5;
+  map<string, string> options = 6;
+  map<string, string> labels = 7;
+  // IPAM configuration
+  string ipam_driver = 8;
+  repeated IpamSubnetConfig ipam_configs = 9;
+}
+
+message IpamSubnetConfig {
+  string subnet = 1;
+  string gateway = 2;
+  string ip_range = 3;
+}
+
+message CreateNetworkResponse {
+  bool success = 1;
+  string message = 2;
+  string network_id = 3;
+}
+
+message RemoveNetworkRequest {
+  string network_id = 1;
+}
+
+message RemoveNetworkResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// DOCKER EVENTS STREAM (B01)
+// ============================================================================
+
+message DockerEventsRequest {
+  // Optional filters: type (container, image, volume, network, service, node, etc.)
+  repeated string type_filters = 1;
+  // Optional since timestamp (Unix seconds)
+  optional int64 since = 2;
+  // Optional until timestamp (Unix seconds)
+  optional int64 until = 3;
+}
+
+message DockerEvent {
+  string event_type = 1;  // "container", "image", "volume", "network", "service", "node"
+  string action = 2;      // "start", "stop", "create", "destroy", "pull", "push", etc.
+  string actor_id = 3;    // ID of the object (container ID, image ID, etc.)
+  map<string, string> actor_attributes = 4;  // Labels and other attributes
+  int64 timestamp = 5;
+  string scope = 6;       // "local" or "swarm"
+}
+
+// ============================================================================
+// SERVICE ROLLBACK (B06)
+// ============================================================================
+
+message RollbackServiceRequest {
+  string service_id = 1;
+}
+
+message RollbackServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// SECRET / CONFIG CRUD (B08, B09)
+// ============================================================================
+
+message CreateSecretRequest {
+  string name = 1;
+  bytes data = 2;
+  map<string, string> labels = 3;
+  // Optional external driver name
+  string driver = 4;
+}
+
+message CreateSecretResponse {
+  bool success = 1;
+  string message = 2;
+  string secret_id = 3;
+}
+
+message DeleteSecretRequest {
+  string secret_id = 1;
+}
+
+message DeleteSecretResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CreateConfigRequest {
+  string name = 1;
+  bytes data = 2;
+  map<string, string> labels = 3;
+}
+
+message CreateConfigResponse {
+  bool success = 1;
+  string message = 2;
+  string config_id = 3;
+}
+
+message DeleteConfigRequest {
+  string config_id = 1;
+}
+
+message DeleteConfigResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// SWARM INIT / JOIN / LEAVE (B04, B05)
+// ============================================================================
+
+message SwarmInitRequest {
+  string listen_addr = 1;  // e.g. "0.0.0.0:2377"
+  string advertise_addr = 2;
+  bool force_new_cluster = 3;
+}
+
+message SwarmInitResponse {
+  bool success = 1;
+  string message = 2;
+  // The swarm node ID of the initialized node
+  string node_id = 3;
+}
+
+message SwarmJoinRequest {
+  // Addresses of existing manager nodes to join
+  repeated string remote_addrs = 1;
+  string join_token = 2;
+  string listen_addr = 3;
+  string advertise_addr = 4;
+}
+
+message SwarmJoinResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SwarmLeaveRequest {
+  bool force = 1;
+}
+
+message SwarmLeaveResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// NODE REMOVE (B07)
+// ============================================================================
+
+message RemoveNodeRequest {
+  string node_id = 1;
+  bool force = 2;
+}
+
+message RemoveNodeResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// NETWORK CONNECT / DISCONNECT (B14)
+// ============================================================================
+
+message NetworkConnectRequest {
+  string network_id = 1;
+  string container_id = 2;
+}
+
+message NetworkConnectResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message NetworkDisconnectRequest {
+  string network_id = 1;
+  string container_id = 2;
+  bool force = 3;
+}
+
+message NetworkDisconnectResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// EXPANDED CREATE/UPDATE SERVICE (B13 — resource limits, mounts, etc.)
+// ============================================================================
+
+message ServiceResourceLimits {
+  int64 nano_cpus = 1;        // CPU limit in nano-CPUs (1e9 = 1 CPU)
+  int64 memory_bytes = 2;     // Memory limit in bytes
+}
+
+message ServiceResourceReservations {
+  int64 nano_cpus = 1;
+  int64 memory_bytes = 2;
+}
+
+message ServiceMount {
+  string type = 1;            // "bind", "volume", "tmpfs"
+  string source = 2;
+  string target = 3;
+  bool read_only = 4;
+}
+
+message ServiceRestartPolicy {
+  string condition = 1;       // "none", "on-failure", "any"
+  int64 delay_ns = 2;
+  uint32 max_attempts = 3;
+  int64 window_ns = 4;
+}
+
+message ServiceUpdateConfig {
+  uint64 parallelism = 1;
+  int64 delay_ns = 2;
+  string failure_action = 3;  // "pause", "continue", "rollback"
+  int64 monitor_ns = 4;
+  double max_failure_ratio = 5;
+  string order = 6;           // "stop-first", "start-first"
+}
+
+message ServiceSecretReference {
+  string secret_id = 1;
+  string secret_name = 2;
+  string file_name = 3;       // Target path, e.g. "/run/secrets/my_secret"
+  string file_uid = 4;
+  string file_gid = 5;
+  uint32 file_mode = 6;
+}
+
+message ServiceConfigReference {
+  string config_id = 1;
+  string config_name = 2;
+  string file_name = 3;
+  string file_uid = 4;
+  string file_gid = 5;
+  uint32 file_mode = 6;
+}
+
+message ServiceHealthCheck {
+  repeated string test = 1;   // e.g. ["CMD", "curl", "-f", "http://localhost/"]
+  int64 interval_ns = 2;
+  int64 timeout_ns = 3;
+  int64 start_period_ns = 4;
+  uint32 retries = 5;
+}
+
+// ============================================================================
+// TASK LOG STREAMING (B02)
+// ============================================================================
+
+message TaskLogStreamRequest {
+  // Task ID
+  string task_id = 1;
+  // Follow mode (like `tail -f`)
+  bool follow = 2;
+  // Number of lines to show from the end
+  optional uint32 tail_lines = 3;
+  // Time-travel: Unix timestamp to start from
+  optional int64 since = 4;
+  // Time-travel: Unix timestamp to stop at
+  optional int64 until = 5;
+  // Show timestamps in output
+  bool timestamps = 6;
+}
+
+// ============================================================================
+// TASK INSPECT (B03)
+// ============================================================================
+
+message TaskInspectRequest {
+  string task_id = 1;
+}
+
+message TaskInspectResponse {
+  optional TaskInspectInfo task = 1;
+}
+
+message TaskInspectInfo {
+  string id = 1;
+  string service_id = 2;
+  string service_name = 3;
+  string node_id = 4;
+  optional uint64 slot = 5;
+  optional string container_id = 6;
+  string state = 7;
+  string desired_state = 8;
+  string status_message = 9;
+  optional string status_err = 10;
+  int64 created_at = 11;
+  int64 updated_at = 12;
+  optional int32 exit_code = 13;
+  // Container spec details
+  string image = 14;
+  repeated string command = 15;
+  repeated string args = 16;
+  map<string, string> env = 17;
+  map<string, string> labels = 18;
+  // Network attachments
+  repeated TaskNetworkAttachment network_attachments = 19;
+  // Resource assignments
+  optional ServiceResourceLimits resource_limits = 20;
+  optional ServiceResourceReservations resource_reservations = 21;
+  // Restart policy
+  optional SwarmRestartPolicy restart_policy = 22;
+  // Timestamps
+  string started_at = 23;
+  string finished_at = 24;
+  // Port status
+  repeated ServicePort port_status = 25;
+}
+
+message TaskNetworkAttachment {
+  string network_id = 1;
+  string network_name = 2;
+  repeated string addresses = 3;
+}
+
+// ============================================================================
+// SWARM UPDATE / UNLOCK (B05)
+// ============================================================================
+
+message SwarmUpdateRequest {
+  // Autolock: enable/disable auto-lock on managers
+  optional bool autolock = 1;
+  // Task history retention limit
+  optional int64 task_history_limit = 2;
+  // Snapshot interval (number of log entries between snapshots)
+  optional uint64 snapshot_interval = 3;
+  // Heartbeat tick (in seconds)
+  optional uint64 heartbeat_tick = 4;
+  // Election tick (in multiples of HeartbeatTick)
+  optional uint64 election_tick = 5;
+  // Certificate expiry (in nanoseconds)
+  optional int64 cert_expiry_ns = 6;
+  // Rotate worker token
+  bool rotate_worker_token = 7;
+  // Rotate manager token
+  bool rotate_manager_token = 8;
+  // Rotate manager unlock key
+  bool rotate_manager_unlock_key = 9;
+}
+
+message SwarmUpdateResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message SwarmUnlockKeyRequest {}
+
+message SwarmUnlockKeyResponse {
+  bool success = 1;
+  string unlock_key = 2;
+  string message = 3;
+}
+
+message SwarmUnlockRequest {
+  string unlock_key = 1;
+}
+
+message SwarmUnlockResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================================
+// COMPOSE STACK DEPLOYMENT (B11)
+// ============================================================================
+
+message DeployComposeStackRequest {
+  // Stack name (used as com.docker.stack.namespace label)
+  string stack_name = 1;
+  // Raw docker-compose YAML content
+  string compose_yaml = 2;
+}
+
+message DeployComposeStackResponse {
+  bool success = 1;
+  string message = 2;
+  // IDs of services created
+  repeated string service_ids = 3;
+  // Names of networks created
+  repeated string network_names = 4;
+  // Names of volumes created
+  repeated string volume_names = 5;
+  // Services that failed to create
+  repeated string failed_services = 6;
+}
+
+// ============================================================================
+// STACK FILE VIEWER (B12)
+// ============================================================================
+
+message GetStackFileRequest {
+  string stack_name = 1;
+}
+
+message GetStackFileResponse {
+  bool found = 1;
+  // The stored compose YAML (empty if not found)
+  string compose_yaml = 2;
+  string stack_name = 3;
 }
