@@ -1,13 +1,14 @@
+//! Route — ControlService gRPC handler.
+
 use tonic::{Request, Response, Status};
 use tracing::info;
 use std::pin::Pin;
-use futures_util::StreamExt;
 use tokio_stream::Stream;
 
-use crate::docker::client::DockerError;
 use crate::state::SharedState;
+use crate::control::map::map_docker_error;
 
-use super::proto::{
+use crate::proto::{
     control_service_server::ControlService,
     ContainerControlRequest, ContainerControlResponse,
     ContainerRemoveRequest,
@@ -30,22 +31,6 @@ impl ControlServiceImpl {
     pub fn new(state: SharedState) -> Self {
         Self { state }
     }
-
-    /// Helper to map DockerError to tonic Status
-    fn map_docker_error(err: DockerError) -> Status {
-        match &err {
-            DockerError::ContainerNotFound(id) => {
-                Status::not_found(format!("Container not found: {}", id))
-            }
-            DockerError::PermissionDenied => {
-                Status::permission_denied("Permission denied")
-            }
-            DockerError::ConnectionFailed(msg) => {
-                Status::unavailable(format!("Docker daemon unavailable: {}", msg))
-            }
-            _ => Status::internal(format!("Docker error: {}", err)),
-        }
-    }
 }
 
 #[tonic::async_trait]
@@ -63,7 +48,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.start_container(container_id)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container started successfully");
 
@@ -87,7 +72,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.stop_container(container_id, timeout_secs)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container stopped successfully");
 
@@ -111,7 +96,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.restart_container(container_id, timeout_secs)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container restarted successfully");
 
@@ -134,7 +119,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.pause_container(container_id)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container paused successfully");
 
@@ -157,7 +142,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.unpause_container(container_id)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container unpaused successfully");
 
@@ -187,7 +172,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.remove_container(container_id, force, remove_volumes)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(container_id = %container_id, "Container removed successfully");
 
@@ -219,7 +204,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.pull_image(&req.image, tag, registry_auth)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(image = %req.image, tag = %tag, "Image pulled successfully");
 
@@ -240,7 +225,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.remove_image(&req.image_id, req.force, req.no_prune)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(image_id = %req.image_id, "Image removed successfully");
 
@@ -265,7 +250,7 @@ impl ControlService for ControlServiceImpl {
 
         let volume = self.state.docker.create_volume(&req.name, driver, req.labels, req.driver_opts)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(name = %req.name, "Volume created successfully");
 
@@ -286,7 +271,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.remove_volume(&req.name, req.force)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(name = %req.name, "Volume removed successfully");
 
@@ -336,7 +321,7 @@ impl ControlService for ControlServiceImpl {
             req.enable_ipv6, req.options, ipam,
         )
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         let network_id = result.id;
         info!(name = %req.name, network_id = %network_id, "Network created successfully");
@@ -358,7 +343,7 @@ impl ControlService for ControlServiceImpl {
 
         self.state.docker.remove_network(&req.network_id)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         info!(network_id = %req.network_id, "Network removed successfully");
 

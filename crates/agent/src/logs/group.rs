@@ -1,7 +1,19 @@
-use super::proto::NormalizedLogEntry;
+//! Multiline log grouper for stack traces and error continuations.
+//!
+//! Designed for production Docker log streams:
+//! - Groups Java/Rust/Go/Python stack traces with their originating error line
+//! - Handles timestamped log prefixes (e.g. `2026-02-05T10:00:00Z ERROR ...`)
+//! - Supports per-container configuration via Docker labels
+//! - Bypasses grouping entirely for structured formats (JSON, Logfmt)
+//! - Proactive timeout flushing via `check_timeout()` for idle streams
+//! - Safety limits to prevent unbounded memory growth
+
 use crate::config::MultilineConfig;
+use crate::proto::NormalizedLogEntry;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+use super::pattern::{has_log_level_prefix, is_continuation_line};
 
 enum GroupAction {
     FlushAndStartNew,
@@ -9,25 +21,13 @@ enum GroupAction {
     StartNew,
 }
 
-/// Multiline log grouper for stack traces and error continuations.
-///
-/// Designed for production Docker log streams:
-/// - Groups Java/Rust/Go/Python stack traces with their originating error line
-/// - Handles timestamped log prefixes (e.g. `2026-02-05T10:00:00Z ERROR ...`)
-/// - Supports per-container configuration via Docker labels
-/// - Bypasses grouping entirely for structured formats (JSON, Logfmt)
-/// - Proactive timeout flushing via `check_timeout()` for idle streams
-/// - Safety limits to prevent unbounded memory growth
 pub struct MultilineGrouper {
     pending_group: Option<LogGroup>,
-    /// Entries waiting to be emitted (from set_passthrough flush).
-    /// Uses a queue so that both deferred and pending-group entries are preserved.
     deferred_queue: VecDeque<NormalizedLogEntry>,
     timeout: Duration,
     last_update: Option<Instant>,
     max_lines: usize,
     require_error_anchor: bool,
-    /// When true, all entries pass through ungrouped (JSON, logfmt, etc.)
     passthrough: bool,
 }
 
@@ -59,12 +59,8 @@ impl MultilineGrouper {
     }
 
     /// Set passthrough mode. When enabled, all entries pass through ungrouped.
-    /// Useful when format detection resolves to JSON/logfmt after construction.
     pub fn set_passthrough(&mut self, passthrough: bool) {
         if passthrough && !self.passthrough {
-            // Switching to passthrough: drain ALL pending state into the queue
-            // so nothing is lost. Both pending_group and any prior deferred
-            // entries are preserved in order.
             if let Some(group) = self.pending_group.take() {
                 self.last_update = None;
                 self.deferred_queue.push_back(group.into_entry());
@@ -79,25 +75,13 @@ impl MultilineGrouper {
     }
 
     /// Process a log entry, possibly grouping it with previous lines.
-    /// Returns entries that are ready to be emitted.  In passthrough mode this
-    /// can be multiple entries (transition drain + the new entry).  In grouping
-    /// mode it is at most one.
-    ///
-    /// Uses `entry.raw_content` for all pattern matching — no separate content
-    /// parameter to prevent data mismatch.
+    /// Returns entries that are ready to be emitted.
     pub fn process(&mut self, entry: NormalizedLogEntry) -> Vec<NormalizedLogEntry> {
-        // Passthrough mode: drain queued transition entries, then pass through
-        // immediately with zero latency.
-        //
-        // We collect entries into `emit` so the caller can yield all of them,
-        // eliminating the one-behind latency the old single-Option API caused.
         if self.passthrough {
             let mut emit = Vec::new();
-            // Drain all transition entries
             while let Some(deferred) = self.deferred_queue.pop_front() {
                 emit.push(deferred);
             }
-            // The current entry passes through immediately
             emit.push(entry);
             return emit;
         }
@@ -168,8 +152,7 @@ impl MultilineGrouper {
         }
     }
 
-    /// Convenience wrapper: process an entry expecting at most one result.
-    /// Use in grouping mode (non-passthrough) tests where the return is 0 or 1 entries.
+    /// Convenience wrapper for tests expecting at most one result.
     #[cfg(test)]
     fn process_one(&mut self, entry: NormalizedLogEntry) -> Option<NormalizedLogEntry> {
         let mut results = self.process(entry);
@@ -181,10 +164,6 @@ impl MultilineGrouper {
     }
 
     /// Proactively check timeout and flush if expired.
-    /// Call this periodically (e.g. every 100ms) from an interval timer
-    /// to ensure the last group is emitted even when the container goes quiet.
-    ///
-    /// Returns `Some(entry)` if a pending group was flushed.
     pub fn check_timeout(&mut self) -> Option<NormalizedLogEntry> {
         if let Some(last) = self.last_update {
             if last.elapsed() > self.timeout {
@@ -205,7 +184,6 @@ impl MultilineGrouper {
 
     /// Flush pending group (call at stream end or timeout).
     pub fn flush(&mut self) -> Option<NormalizedLogEntry> {
-        // Deferred entries (from set_passthrough transition) take priority
         if let Some(deferred) = self.deferred_queue.pop_front() {
             return Some(deferred);
         }
@@ -235,7 +213,7 @@ impl LogGroup {
             continuations: Vec::new(),
         }
     }
-    
+
     fn add_continuation(&mut self, entry: NormalizedLogEntry) {
         self.continuations.push(LogLine {
             content: entry.raw_content,
@@ -246,21 +224,18 @@ impl LogGroup {
 
     fn into_entry(self) -> NormalizedLogEntry {
         let continuation_count = self.continuations.len();
-        // Safe u32 conversion — cap at u32::MAX instead of silent wrapping
         let line_count = u32::try_from(1 + continuation_count).unwrap_or(u32::MAX);
         let is_grouped = !self.continuations.is_empty();
-        
-        // Convert LogLine to proto LogLine
-        let proto_lines: Vec<super::proto::LogLine> = self.continuations
+
+        let proto_lines: Vec<crate::proto::LogLine> = self.continuations
             .into_iter()
-            .map(|line| super::proto::LogLine {
+            .map(|line| crate::proto::LogLine {
                 content: line.content,
                 timestamp_nanos: line.timestamp_nanos,
                 sequence: line.sequence,
             })
             .collect();
-        
-        // Return primary with continuations attached (structure preserved)
+
         NormalizedLogEntry {
             grouped_lines: proto_lines,
             line_count,
@@ -277,7 +252,7 @@ impl LogGroup {
     }
 }
 
-/// Individual log line within a group
+/// Individual log line within a group.
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub content: Vec<u8>,
@@ -285,353 +260,10 @@ pub struct LogLine {
     pub sequence: u64,
 }
 
-#[derive(Debug)]
-enum ContinuationPattern {
-    StackFrame,
-    ErrorIndentation,
-    ContinueToken,
-}
-
-/// Detect if current line is a continuation of the previous primary line.
-fn is_continuation_line(
-    current: &[u8],
-    previous: &[u8],
-    previous_level: i32,
-    require_error_anchor: bool,
-) -> Option<ContinuationPattern> {
-
-    if current.is_empty() {
-        return None;
-    }
-
-    if starts_with_any(current, &[b"   at ", b"\tat ", b"\t at "]) {
-        return Some(ContinuationPattern::StackFrame);
-    }
-
-    if starts_with_any(current, &[b"Caused by:", b"caused by:", b"due to:", b"Suppressed:"]) {
-        return Some(ContinuationPattern::StackFrame);
-    }
-
-    if starts_with_any(current, &[b"  File \"", b"    raise ", b"Traceback "]) {
-        return Some(ContinuationPattern::StackFrame);
-    }
-
-    if starts_with_any(current, &[b"goroutine ", b"\tgoroutine "]) {
-        if contains_any(previous, &[b"panic", b"runtime error"]) {
-            return Some(ContinuationPattern::StackFrame);
-        }
-    }
-
-    if starts_with_any(current, &[b"   --- ", b"   at System.", b"   at Microsoft."]) {
-        return Some(ContinuationPattern::StackFrame);
-    }
-
-    if current.len() > 6 && current[0..3] == *b"   " {
-        let rest = &current[3..];
-        if rest.len() >= 3
-            && rest[0].is_ascii_digit()
-            && (rest[1] == b':' || (rest[1].is_ascii_digit() && rest[2] == b':'))
-        {
-            return Some(ContinuationPattern::StackFrame);
-        }
-    }
-
-
-    let is_indented = current.starts_with(b"    ") || current.starts_with(b"\t");
-    if is_indented {
-        if require_error_anchor {
-
-            let is_error_anchor = previous_level >= 4
-                || contains_any(
-                    previous,
-                    &[
-                        b"panic", b"ERROR", b"Exception", b"exception",
-                        b"error:", b"FATAL", b"fatal", b"PANIC",
-                        b"Traceback", b"thread '",
-                    ],
-                );
-
-            if is_error_anchor {
-                return Some(ContinuationPattern::ErrorIndentation);
-            }
-        } else {
-            return Some(ContinuationPattern::ErrorIndentation);
-        }
-    }
-
-    if starts_with_any(
-        current,
-        &[
-            b"...",
-            b"\xe2\x94\x94", // └ in UTF-8
-            b"\xe2\x86\xb3", // ↳ in UTF-8
-            b"\xe2\x94\x82", // │ in UTF-8
-            b"\xe2\x94\x9c", // ├ in UTF-8
-        ],
-    ) {
-        return Some(ContinuationPattern::ContinueToken);
-    }
-
-    None
-}
-
-
-fn starts_with_any(haystack: &[u8], needles: &[&[u8]]) -> bool {
-    needles.iter().any(|n| haystack.starts_with(n))
-}
-
-fn contains_any(haystack: &[u8], needles: &[&[u8]]) -> bool {
-    needles.iter().any(|n| {
-        haystack
-            .windows(n.len())
-            .any(|w| w == *n)
-    })
-}
-
-/// Skip past common log-line prefixes (timestamps, brackets, container IDs)
-/// and return the offset where the "real" message content starts.
-///
-/// Handles patterns like:
-/// - `2026-02-05T10:00:00.000Z ERROR ...`
-/// - `2026-02-05 10:00:00 [ERROR] ...`
-/// - `[2026-02-05T10:00:00Z] ERROR ...`
-/// - `Jan  5 10:00:00 hostname app: ERROR ...`
-/// - `container_id | ERROR ...`
-fn skip_log_prefix(content: &[u8]) -> usize {
-    if content.is_empty() {
-        return 0;
-    }
-
-    let len = content.len();
-    let mut pos = 0;
-
-    // Log level keywords — used to avoid eating bracketed levels like [ERROR]
-    let level_keywords: &[&[u8]] = &[
-        b"ERROR", b"WARN", b"INFO", b"DEBUG", b"TRACE", b"FATAL",
-        b"error", b"warn", b"info", b"debug", b"trace", b"fatal",
-        b"WARNING", b"CRITICAL", b"NOTICE",
-        b"warning", b"critical", b"notice",
-    ];
-
-    // Skip leading whitespace
-    while pos < len && content[pos].is_ascii_whitespace() {
-        pos += 1;
-    }
-
-    // Attempt to skip up to 4 "prefix segments" (timestamp + optional hostname/tag)
-    for _ in 0..4 {
-        if pos >= len {
-            return 0; // Consumed everything — no real content found
-        }
-
-        // Skip whitespace between segments
-        while pos < len && content[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-
-        // Bracketed group: [anything]
-        // But do NOT consume if the bracket contains a log level keyword (e.g. [ERROR])
-        if pos < len && content[pos] == b'[' {
-            if let Some(end) = content[pos..].iter().position(|&b| b == b']') {
-                let inner = &content[pos + 1..pos + end];
-                let is_level = level_keywords
-                    .iter()
-                    .any(|kw| inner == *kw);
-                if is_level {
-                    // This bracket contains a level — stop skipping
-                    break;
-                }
-                pos += end + 1;
-                continue;
-            }
-        }
-
-        // Timestamp-like: starts with digit, read until whitespace
-        if pos < len && content[pos].is_ascii_digit() {
-            let start = pos;
-            let mut has_separator = false;
-            while pos < len && !content[pos].is_ascii_whitespace() {
-                if content[pos] == b'-' || content[pos] == b':' || content[pos] == b'T' {
-                    has_separator = true;
-                }
-                pos += 1;
-            }
-            if has_separator && (pos - start) >= 8 {
-                // Looks like a timestamp (at least 8 chars with date/time separators)
-                // Check if a space-separated time component follows (e.g. "2026-02-05 10:00:00.123")
-                // Peek ahead: skip whitespace, check if next token is time-like (digit + colon, < 20 chars)
-                let saved = pos;
-                while pos < len && content[pos].is_ascii_whitespace() {
-                    pos += 1;
-                }
-                if pos < len && content[pos].is_ascii_digit() {
-                    let time_start = pos;
-                    let mut time_has_colon = false;
-                    while pos < len && !content[pos].is_ascii_whitespace() {
-                        if content[pos] == b':' {
-                            time_has_colon = true;
-                        }
-                        pos += 1;
-                    }
-                    let time_len = pos - time_start;
-                    if time_has_colon && time_len >= 5 && time_len <= 20 {
-                        // Consumed the time part as well (space-separated datetime)
-                        continue;
-                    }
-                    // Not a time component — rewind to just after the date token
-                    pos = saved;
-                }
-                continue;
-            } else {
-                // Wasn't a timestamp — rewind
-                pos = start;
-                break;
-            }
-        }
-
-        // Syslog month prefix: "Jan  5 10:00:00 hostname app:"
-        let syslog_months: &[&[u8]] = &[
-            b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun",
-            b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
-        ];
-        if pos + 3 <= len && syslog_months.iter().any(|m| content[pos..].starts_with(m)) {
-            let start = pos;
-            // Skip month
-            pos += 3;
-            // Skip spaces + day + space + time
-            while pos < len
-                && (content[pos].is_ascii_whitespace()
-                    || content[pos].is_ascii_digit()
-                    || content[pos] == b':')
-            {
-                pos += 1;
-            }
-            if pos - start >= 12 {
-                // Skip optional hostname (non-space word followed by space)
-                while pos < len && content[pos].is_ascii_whitespace() {
-                    pos += 1;
-                }
-                let word_start = pos;
-                while pos < len && !content[pos].is_ascii_whitespace() && content[pos] != b':' {
-                    pos += 1;
-                }
-                // If word ends with ':' skip it (syslog tag)
-                if pos < len && content[pos] == b':' {
-                    pos += 1;
-                } else if pos > word_start {
-                    // It might be a hostname — skip it and try the next word for tag
-                    while pos < len && content[pos].is_ascii_whitespace() {
-                        pos += 1;
-                    }
-                    let tag_start = pos;
-                    while pos < len && !content[pos].is_ascii_whitespace() && content[pos] != b':'
-                    {
-                        pos += 1;
-                    }
-                    if pos < len && content[pos] == b':' {
-                        pos += 1;
-                    } else {
-                        pos = tag_start;
-                    }
-                }
-                continue;
-            } else {
-                pos = start;
-                break;
-            }
-        }
-
-        // Pipe separator: "container_name | ERROR ..."
-        if let Some(pipe_pos) = content[pos..].iter().position(|&b| b == b'|') {
-            let absolute = pos + pipe_pos;
-            // Only treat as prefix if pipe is reasonably close (within 80 chars),
-            // there's content after, AND the left side doesn't already contain
-            // a log level keyword (avoids consuming "ERROR | details" as prefix).
-            if pipe_pos < 80 && absolute + 2 < len {
-                let left = &content[pos..absolute];
-                let has_level_before = level_keywords.iter().any(|kw| {
-                    left.windows(kw.len()).any(|w| w == *kw)
-                });
-                if !has_level_before {
-                    pos = absolute + 1;
-                    continue;
-                }
-            }
-        }
-
-        // Nothing matched — stop scanning
-        break;
-    }
-
-    // Skip trailing whitespace after prefix
-    while pos < len && content[pos].is_ascii_whitespace() {
-        pos += 1;
-    }
-
-    // Safety: if we consumed most of the line, it probably wasn't prefix.
-    // e.g. "2026-02-05T10:00:00Z 2026-02-05 10:00:00.123 ERROR boom"
-    if len > 10 && pos > len * 5 / 6 {
-        return 0;
-    }
-
-    pos
-}
-
-/// Check if a line contains a log level keyword, scanning past timestamp prefixes.
-fn has_log_level_prefix(content: &[u8]) -> bool {
-    if content.is_empty() {
-        return false;
-    }
-
-    let levels: &[&[u8]] = &[
-        b"ERROR", b"WARN", b"INFO", b"DEBUG", b"TRACE", b"FATAL",
-        b"error", b"warn", b"info", b"debug", b"trace", b"fatal",
-        b"E ", b"W ", b"I ", // Single-letter levels (Go zap, etc.)
-    ];
-
-    if check_level_at(content, 0, levels) {
-        return true;
-    }
-
-    let offset = skip_log_prefix(content);
-    if offset > 0 && offset < content.len() {
-        if content[offset] == b'[' {
-            let after_bracket = offset + 1;
-            if after_bracket < content.len() && check_level_at(content, after_bracket, levels) {
-                return true;
-            }
-        }
-        if check_level_at(content, offset, levels) {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Check if a log level keyword appears at exact position `pos` with a word boundary after it.
-fn check_level_at(content: &[u8], pos: usize, levels: &[&[u8]]) -> bool {
-    let slice = &content[pos..];
-    for &level in levels {
-        if slice.starts_with(level) {
-            let end = pos + level.len();
-            if end >= content.len() {
-                return true; // Level is at end of line
-            }
-            let next = content[end];
-            // Word boundary: anything non-alphanumeric and not underscore
-            if !next.is_ascii_alphanumeric() && next != b'_' {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn create_entry(content: &[u8], level: i32, sequence: u64) -> NormalizedLogEntry {
         NormalizedLogEntry {
@@ -679,7 +311,6 @@ mod tests {
         assert_eq!(grouped.grouped_lines.len(), 2);
         assert!(grouped.is_grouped);
 
-        // Verify structure preserved (not merged)
         assert_eq!(grouped.raw_content, b"ERROR panic at main.rs:10");
         assert_eq!(
             grouped.grouped_lines[0].content,
@@ -735,13 +366,11 @@ mod tests {
         grouper.process_one(line1);
         grouper.process_one(line2);
 
-        // No timeout yet
         assert!(grouper.check_timeout().is_none());
         assert!(grouper.has_pending());
 
         std::thread::sleep(Duration::from_millis(100));
 
-        // Now it should flush
         let flushed = grouper.check_timeout().unwrap();
         assert!(flushed.is_grouped);
         assert_eq!(flushed.line_count, 2);
@@ -753,75 +382,6 @@ mod tests {
         let config = default_test_config();
         let mut grouper = MultilineGrouper::new(&config);
         assert!(grouper.check_timeout().is_none());
-    }
-
-    // ─── Log header detection (with timestamp prefixes) ─────────
-
-    #[test]
-    fn test_timestamped_error_header() {
-        assert!(has_log_level_prefix(
-            b"2026-02-05T10:00:00.000Z ERROR something broke"
-        ));
-        assert!(has_log_level_prefix(
-            b"2026-02-05T10:00:00.000Z INFO startup"
-        ));
-    }
-
-    #[test]
-    fn test_bracketed_timestamp_header() {
-        assert!(has_log_level_prefix(
-            b"[2026-02-05T10:00:00Z] ERROR something"
-        ));
-        assert!(has_log_level_prefix(
-            b"[2026-02-05T10:00:00Z] [ERROR] something"
-        ));
-    }
-
-    #[test]
-    fn test_plain_level_at_start() {
-        assert!(has_log_level_prefix(b"ERROR something broke"));
-        assert!(has_log_level_prefix(b"WARN low disk"));
-        assert!(has_log_level_prefix(b"INFO started"));
-        assert!(has_log_level_prefix(b"DEBUG details"));
-        assert!(has_log_level_prefix(b"FATAL crash"));
-    }
-
-    #[test]
-    fn test_level_word_boundary() {
-        assert!(!has_log_level_prefix(b"information is key"));
-        assert!(!has_log_level_prefix(b"warning_count=5"));
-        assert!(!has_log_level_prefix(b"debuggable item"));
-        assert!(!has_log_level_prefix(b"traceback at line 5"));
-    }
-
-    #[test]
-    fn test_level_with_colon() {
-        assert!(has_log_level_prefix(b"ERROR: something broke"));
-        assert!(has_log_level_prefix(b"WARN: attention"));
-    }
-
-    #[test]
-    fn test_empty_content_no_header() {
-        assert!(!has_log_level_prefix(b""));
-    }
-
-    #[test]
-    fn test_syslog_style_header() {
-        assert!(has_log_level_prefix(
-            b"Jan  5 10:00:00 myhost app: ERROR something"
-        ));
-    }
-
-    #[test]
-    fn test_pipe_prefixed_header() {
-        assert!(has_log_level_prefix(b"web_1 | ERROR something"));
-    }
-
-    #[test]
-    fn test_double_timestamp_header() {
-        assert!(has_log_level_prefix(
-            b"2026-02-05T10:00:00Z 2026-02-05 10:00:00.123 ERROR boom"
-        ));
     }
 
     // ─── Continuation patterns ──────────────────────────────────
@@ -1096,12 +656,9 @@ mod tests {
 
         assert!(grouper.has_pending());
 
-        // Switching to passthrough drains pending group into deferred queue
         grouper.set_passthrough(true);
-        assert!(grouper.has_pending()); // Flushed group is queued for deferred emission
+        assert!(grouper.has_pending());
 
-        // process(line3) with non-empty queue: returns BOTH the queued grouped
-        // entry AND line3 in one call (zero-latency passthrough).
         let line3 = create_entry(b"{\"level\":\"info\"}", 3, 3);
         let results = grouper.process(line3);
         assert_eq!(results.len(), 2);
@@ -1110,13 +667,11 @@ mod tests {
         assert!(!results[1].is_grouped);
         assert_eq!(results[1].raw_content, b"{\"level\":\"info\"}");
 
-        // Queue is now fully drained — subsequent entries pass through immediately
         let line4 = create_entry(b"{\"level\":\"warn\"}", 4, 4);
         let results4 = grouper.process(line4);
         assert_eq!(results4.len(), 1);
         assert_eq!(results4[0].raw_content, b"{\"level\":\"warn\"}");
 
-        // Nothing pending — flush returns None
         assert!(!grouper.has_pending());
         assert!(grouper.flush().is_none());
     }
@@ -1151,7 +706,7 @@ mod tests {
         grouper.process_one(line4);
 
         let flushed = grouper.process_one(line5).unwrap();
-        assert_eq!(flushed.line_count, 4); // 1 primary + 3 continuations
+        assert_eq!(flushed.line_count, 4);
     }
 
     #[test]
@@ -1168,7 +723,7 @@ mod tests {
         grouper.process_one(line2);
 
         let flushed = grouper.process_one(line3).unwrap();
-        assert_eq!(flushed.line_count, 2); // primary + 1
+        assert_eq!(flushed.line_count, 2);
     }
 
     // ─── Edge cases ─────────────────────────────────────────────
@@ -1200,7 +755,6 @@ mod tests {
         grouper.process_one(line2);
 
         let grouped = grouper.flush().unwrap();
-        // Whitespace-only is indented, and previous was ERROR → groups in conservative mode
         assert!(grouped.is_grouped);
     }
 
@@ -1218,12 +772,6 @@ mod tests {
 
         assert!(!flushed.is_grouped);
         assert_eq!(flushed.raw_content.len(), 100_000);
-    }
-
-    #[test]
-    fn test_only_level_word() {
-        assert!(has_log_level_prefix(b"ERROR"));
-        assert!(has_log_level_prefix(b"WARN"));
     }
 
     #[test]
@@ -1319,46 +867,6 @@ mod tests {
         grouper.process_one(entry);
         let flushed = grouper.flush().unwrap();
         assert_eq!(flushed.container_id, "abc123");
-    }
-
-    // ─── skip_log_prefix unit tests ─────────────────────────────
-
-    #[test]
-    fn test_skip_prefix_iso_timestamp() {
-        let input = b"2026-02-05T10:00:00.000Z ERROR boom";
-        let offset = skip_log_prefix(input);
-        assert_eq!(&input[offset..], b"ERROR boom");
-    }
-
-    #[test]
-    fn test_skip_prefix_bracketed_timestamp() {
-        let input = b"[2026-02-05T10:00:00Z] ERROR boom";
-        let offset = skip_log_prefix(input);
-        assert_eq!(&input[offset..], b"ERROR boom");
-    }
-
-    #[test]
-    fn test_skip_prefix_no_prefix() {
-        assert_eq!(skip_log_prefix(b"ERROR boom"), 0);
-    }
-
-    #[test]
-    fn test_skip_prefix_empty() {
-        assert_eq!(skip_log_prefix(b""), 0);
-    }
-
-    #[test]
-    fn test_skip_prefix_double_timestamp() {
-        let input = b"2026-02-05T10:00:00Z 2026-02-05 10:00:00.123 ERROR boom";
-        let offset = skip_log_prefix(input);
-        assert_eq!(&input[offset..], b"ERROR boom");
-    }
-
-    #[test]
-    fn test_skip_prefix_pipe() {
-        let input = b"web_1 | ERROR crash";
-        let offset = skip_log_prefix(input);
-        assert_eq!(&input[offset..], b"ERROR crash");
     }
 
     // ─── Interaction: timestamp prefix + grouping ────────────────

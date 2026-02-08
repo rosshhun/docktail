@@ -1,3 +1,10 @@
-pub(crate) mod stream;
-pub(crate) mod client;
-pub(crate) mod inventory;
+pub mod stream;
+pub mod client;
+pub mod inventory;
+pub mod container;
+pub mod image;
+pub mod volume;
+pub mod network;
+pub mod swarm;
+pub mod shell;
+pub mod event;

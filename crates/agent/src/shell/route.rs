@@ -1,13 +1,15 @@
+//! Route — ShellService gRPC handler.
+
 use std::pin::Pin;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn, debug};
 
-use crate::docker::client::DockerError;
 use crate::state::SharedState;
+use crate::shell::map::map_docker_error;
 
-use super::proto::{
+use crate::proto::{
     shell_service_server::ShellService,
     ShellRequest, ShellResponse,
     ShellOutput, ShellExit, ShellError,
@@ -25,21 +27,6 @@ pub struct ShellServiceImpl {
 impl ShellServiceImpl {
     pub fn new(state: SharedState) -> Self {
         Self { state }
-    }
-
-    fn map_docker_error(err: DockerError) -> Status {
-        match &err {
-            DockerError::ContainerNotFound(id) => {
-                Status::not_found(format!("Container not found: {}", id))
-            }
-            DockerError::PermissionDenied => {
-                Status::permission_denied("Permission denied")
-            }
-            DockerError::ConnectionFailed(msg) => {
-                Status::unavailable(format!("Docker daemon unavailable: {}", msg))
-            }
-            _ => Status::internal(format!("Docker error: {}", err)),
-        }
     }
 }
 
@@ -68,7 +55,7 @@ impl ShellService for ShellServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to receive init: {}", e)))?;
 
         let init = match init_msg.request {
-            Some(super::proto::shell_request::Request::Init(init)) => init,
+            Some(crate::proto::shell_request::Request::Init(init)) => init,
             _ => return Err(Status::invalid_argument(
                 "First message must be an Init message"
             )),
@@ -98,7 +85,7 @@ impl ShellService for ShellServiceImpl {
         let exec_id = self.state.docker
             .create_exec(&container_id, cmd, tty, init.working_dir, env)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         debug!(exec_id = %exec_id, "Exec instance created");
 
@@ -116,7 +103,7 @@ impl ShellService for ShellServiceImpl {
         let exec_result = self.state.docker
             .start_exec(&exec_id, tty)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         match exec_result {
             bollard::exec::StartExecResults::Attached { output, input } => {
@@ -149,7 +136,7 @@ impl ShellService for ShellServiceImpl {
                                 };
 
                                 let response = ShellResponse {
-                                    response: Some(super::proto::shell_response::Response::Output(
+                                    response: Some(crate::proto::shell_response::Response::Output(
                                         ShellOutput { data, stream },
                                     )),
                                 };
@@ -161,7 +148,7 @@ impl ShellService for ShellServiceImpl {
                             Err(e) => {
                                 warn!(exec_id = %exec_id_clone, "Exec output error: {}", e);
                                 let _ = tx_output.send(Ok(ShellResponse {
-                                    response: Some(super::proto::shell_response::Response::Error(
+                                    response: Some(crate::proto::shell_response::Response::Error(
                                         ShellError {
                                             message: format!("Output error: {}", e),
                                             code: "EXEC_OUTPUT_ERROR".to_string(),
@@ -178,7 +165,7 @@ impl ShellService for ShellServiceImpl {
                         Ok(inspect) => {
                             let exit_code = inspect.exit_code.unwrap_or(-1) as i32;
                             let _ = tx_output.send(Ok(ShellResponse {
-                                response: Some(super::proto::shell_response::Response::Exit(
+                                response: Some(crate::proto::shell_response::Response::Exit(
                                     ShellExit {
                                         exit_code,
                                         message: if exit_code == 0 {
@@ -193,7 +180,7 @@ impl ShellService for ShellServiceImpl {
                         Err(e) => {
                             warn!(exec_id = %exec_id_clone, "Failed to inspect exec: {}", e);
                             let _ = tx_output.send(Ok(ShellResponse {
-                                response: Some(super::proto::shell_response::Response::Exit(
+                                response: Some(crate::proto::shell_response::Response::Exit(
                                     ShellExit {
                                         exit_code: -1,
                                         message: "Process exited (unable to determine exit code)".to_string(),
@@ -214,7 +201,7 @@ impl ShellService for ShellServiceImpl {
                         match result {
                             Ok(shell_req) => {
                                 match shell_req.request {
-                                    Some(super::proto::shell_request::Request::Input(shell_input)) => {
+                                    Some(crate::proto::shell_request::Request::Input(shell_input)) => {
                                         if let Err(e) = input.write_all(&shell_input.data).await {
                                             warn!(
                                                 exec_id = %exec_id_for_input,
@@ -232,7 +219,7 @@ impl ShellService for ShellServiceImpl {
                                             break;
                                         }
                                     }
-                                    Some(super::proto::shell_request::Request::Resize(resize)) => {
+                                    Some(crate::proto::shell_request::Request::Resize(resize)) => {
                                         if let Some(size) = resize.size {
                                             if let Err(e) = docker_state2.docker.resize_exec(
                                                 &exec_id_for_input,
@@ -247,7 +234,7 @@ impl ShellService for ShellServiceImpl {
                                             }
                                         }
                                     }
-                                    Some(super::proto::shell_request::Request::Init(_)) => {
+                                    Some(crate::proto::shell_request::Request::Init(_)) => {
                                         warn!("Received duplicate Init message, ignoring");
                                     }
                                     None => {}
@@ -329,13 +316,13 @@ impl ShellService for ShellServiceImpl {
         let exec_id = self.state.docker
             .create_exec(container_id, cmd, false, req.working_dir, env)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         // Start exec in attached mode to capture output
         let exec_result = self.state.docker
             .start_exec(&exec_id, false)
             .await
-            .map_err(Self::map_docker_error)?;
+            .map_err(map_docker_error)?;
 
         match exec_result {
             bollard::exec::StartExecResults::Attached { mut output, .. } => {
@@ -381,8 +368,6 @@ impl ShellService for ShellServiceImpl {
                                 // Drop the output stream to disconnect
                                 drop(output);
                                 // Kill the still-running exec process inside the container.
-                                // Inspect the exec to check if it's still running, then
-                                // send SIGKILL via a helper exec.
                                 if let Ok(inspect) = self.state.docker.inspect_exec(&exec_id).await {
                                     if inspect.running.unwrap_or(false) {
                                         if let Some(pid) = inspect.pid {

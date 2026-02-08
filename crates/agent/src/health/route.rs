@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use super::proto::{
+use crate::proto::{
     health_service_server::HealthService,
     HealthCheckRequest, HealthCheckResponse,
     HealthStatus,

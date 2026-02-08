@@ -1,3 +1,5 @@
+//! Sync — background inventory sync task.
+
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::{self, MissedTickBehavior};
