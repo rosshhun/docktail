@@ -1093,7 +1093,18 @@ impl SwarmService for SwarmServiceImpl {
         debug!(network_id = %network_id, "Inspecting swarm network");
 
         let net = self.state.docker.inspect_network(&network_id).await
-            .map_err(|e| Status::not_found(format!("Network not found: {}", e)))?;
+            .map_err(|e| {
+                // Classify the error: only 404 is "not found"; other failures
+                // (transport, permission, internal) should not be masked.
+                let msg = e.to_string();
+                if msg.contains("404") || msg.to_lowercase().contains("not found") {
+                    Status::not_found(format!("Network not found: {}", e))
+                } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
+                    Status::permission_denied(format!("Permission denied inspecting network: {}", e))
+                } else {
+                    Status::internal(format!("Failed to inspect network: {}", e))
+                }
+            })?;
 
         // Convert NetworkInspect → Network-like for reuse
         // NetworkInspect and Network share the same field layout in bollard
@@ -1165,7 +1176,14 @@ impl SwarmService for SwarmServiceImpl {
                     .unwrap_or_default();
 
                 // List tasks for this service (includes historical/failed tasks)
-                let tasks: Vec<bollard::models::Task> = state.docker.list_tasks().await.unwrap_or_default();
+                let tasks: Vec<bollard::models::Task> = match state.docker.list_tasks().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(service_id = %service_id, error = %e, "Failed to list tasks in service update stream — skipping this poll cycle");
+                        tokio::time::sleep(std::time::Duration::from_millis(poll_ms)).await;
+                        continue;
+                    }
+                };
                 let service_tasks: Vec<_> = tasks.into_iter()
                     .filter(|t| t.service_id.as_deref() == Some(&service_id))
                     .collect();
@@ -1226,6 +1244,12 @@ impl SwarmService for SwarmServiceImpl {
 
                     prev_task_states.insert(task_id.to_string(), (task_state, updated_at));
                 }
+
+                // Prune prev_task_states for tasks no longer present to avoid unbounded growth
+                let current_task_ids: std::collections::HashSet<&str> = service_tasks.iter()
+                    .filter_map(|t| t.id.as_deref())
+                    .collect();
+                prev_task_states.retain(|id, _| current_task_ids.contains(id.as_str()));
 
                 let now = chrono::Utc::now().timestamp();
 
@@ -1526,17 +1550,22 @@ impl SwarmService for SwarmServiceImpl {
 
                             // Get affected tasks for drain events
                             let affected_tasks = if availability == "drain" {
-                                let tasks = state.docker.list_tasks().await.unwrap_or_default();
-                                tasks.into_iter()
-                                    .filter(|t| t.node_id.as_deref() == Some(&node_id))
-                                    .filter(|t| {
-                                        t.status.as_ref()
-                                            .and_then(|s| s.state.as_ref())
-                                            .map(|s| !matches!(format!("{:?}", s).to_lowercase().as_str(), "shutdown" | "complete" | "failed" | "rejected" | "remove" | "orphaned"))
-                                            .unwrap_or(false)
-                                    })
-                                    .map(|t| convert_task_to_proto(&t))
-                                    .collect()
+                                match state.docker.list_tasks().await {
+                                    Ok(tasks) => tasks.into_iter()
+                                        .filter(|t| t.node_id.as_deref() == Some(&node_id))
+                                        .filter(|t| {
+                                            t.status.as_ref()
+                                                .and_then(|s| s.state.as_ref())
+                                                .map(|s| !matches!(format!("{:?}", s).to_lowercase().as_str(), "shutdown" | "complete" | "failed" | "rejected" | "remove" | "orphaned"))
+                                                .unwrap_or(false)
+                                        })
+                                        .map(|t| convert_task_to_proto(&t))
+                                        .collect(),
+                                    Err(e) => {
+                                        tracing::warn!(node_id = %node_id, error = %e, "Failed to list tasks for drain event — affected_tasks will be empty");
+                                        Vec::new()
+                                    }
+                                }
                             } else {
                                 Vec::new()
                             };
@@ -1572,7 +1601,13 @@ impl SwarmService for SwarmServiceImpl {
                     if availability == "drain" {
                         let was_draining = draining_nodes.get(&node_id).copied().unwrap_or(false);
                         if !was_draining {
-                            let tasks = state.docker.list_tasks().await.unwrap_or_default();
+                            let tasks = match state.docker.list_tasks().await {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    tracing::warn!(node_id = %node_id, error = %e, "Failed to list tasks for drain completion check — skipping");
+                                    continue;
+                                }
+                            };
                             let running_on_node = tasks.iter()
                                 .filter(|t| t.node_id.as_deref() == Some(&node_id))
                                 .any(|t| {
@@ -2264,13 +2299,16 @@ impl SwarmService for SwarmServiceImpl {
                             restarts.retain(|&ts| now - ts < 300);
                             let count = restarts.len() as u32;
 
-                            // Find the old task for context
-                            let old_task_proto = tasks.iter()
-                                .find(|t| t.id.as_deref() == Some(prev_task_id))
-                                .map(|t| convert_task_to_proto(t));
+                            // Find the old (failed) task for context
+                            let old_task = tasks.iter()
+                                .find(|t| t.id.as_deref() == Some(prev_task_id));
+                            let old_task_proto = old_task.map(|t| convert_task_to_proto(t));
 
-                            // Check for OOM
-                            let is_oom = task.status.as_ref()
+                            // Check for OOM on the OLD (failed) task — Docker records
+                            // OOM information on the task that was killed, not the
+                            // replacement task that was just scheduled.
+                            let is_oom = old_task
+                                .and_then(|t| t.status.as_ref())
                                 .and_then(|s| s.err.as_ref())
                                 .map(|e| e.to_lowercase().contains("oom") || e.to_lowercase().contains("out of memory"))
                                 .unwrap_or(false);

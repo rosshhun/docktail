@@ -43,6 +43,10 @@ pub enum SwarmInspectResult {
 #[derive(Debug, Clone)]
 pub struct DockerClient {
     client: Docker,
+    /// The Docker socket path this client is connected to.
+    /// Used to set DOCKER_HOST when shelling out to the Docker CLI,
+    /// ensuring CLI commands target the same daemon as the bollard client.
+    socket_path: String,
 }
 
 impl DockerClient {
@@ -56,7 +60,24 @@ impl DockerClient {
                 .map_err(|e| DockerError::ConnectionFailed(e.to_string()))?
         };
 
-        Ok(DockerClient { client: connection })
+        Ok(DockerClient { client: connection, socket_path: socket_path.to_string() })
+    }
+
+    /// Build a `tokio::process::Command` for the Docker CLI that targets
+    /// the same daemon this client is connected to.
+    /// Sets `DOCKER_HOST` when a non-default socket path is configured.
+    fn docker_cli_command(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("docker");
+        if !self.socket_path.is_empty() {
+            // Ensure the path is a proper URI for DOCKER_HOST
+            let host = if self.socket_path.starts_with("unix://") || self.socket_path.starts_with("tcp://") {
+                self.socket_path.clone()
+            } else {
+                format!("unix://{}", self.socket_path)
+            };
+            cmd.env("DOCKER_HOST", host);
+        }
+        cmd
     }
     pub async fn list_containers(&self) -> Result<Vec<ContainerInfo>, DockerError> {
         let options = Some(ListContainersOptions {
@@ -1080,7 +1101,7 @@ impl DockerClient {
             ));
         }
 
-        let output = tokio::process::Command::new("docker")
+        let output = self.docker_cli_command()
             .args(["swarm", "unlock-key", "-q"])
             .output()
             .await
@@ -1108,7 +1129,7 @@ impl DockerClient {
     pub async fn swarm_unlock(&self, unlock_key: &str) -> Result<(), DockerError> {
         use tokio::io::AsyncWriteExt;
 
-        let mut child = tokio::process::Command::new("docker")
+        let mut child = self.docker_cli_command()
             .args(["swarm", "unlock"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

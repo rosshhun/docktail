@@ -13,6 +13,59 @@ use futures::StreamExt;
 
 pub type ClusterSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
+/// Helper to resolve an optional agent_id to a manager agent connection.
+/// If `agent_id` is Some, validates it's a manager. If None, auto-selects a
+/// healthy manager agent. Returns the agent connection for client cloning.
+async fn resolve_swarm_agent(
+    state: &AppState,
+    agent_id: Option<&str>,
+) -> async_graphql::Result<std::sync::Arc<crate::agent::AgentConnection>> {
+    use crate::agent::pool::SwarmRole;
+
+    if let Some(id) = agent_id {
+        let agent = state.agent_pool.get_agent(id)
+            .ok_or_else(|| ApiError::AgentNotFound(id.to_string()).extend())?;
+
+        match agent.swarm_role() {
+            SwarmRole::Worker => {
+                return Err(ApiError::Internal(format!(
+                    "Agent '{}' is a swarm worker node and cannot handle swarm management queries. \
+                     Specify a manager agent or omit agentId for auto-selection.",
+                    id
+                )).extend());
+            }
+            SwarmRole::None => {
+                return Err(ApiError::Internal(format!(
+                    "Agent '{}' is not part of any swarm. Specify an agent that is a swarm manager.",
+                    id
+                )).extend());
+            }
+            SwarmRole::Manager => { /* ok */ }
+        }
+        Ok(agent)
+    } else {
+        // Auto-select: find a healthy manager
+        let agents = state.agent_pool.list_agents();
+        let manager = agents.iter().find(|a| {
+            a.is_healthy() && a.swarm_role() == SwarmRole::Manager
+        });
+
+        match manager {
+            Some(agent) => Ok(agent.clone()),
+            None => {
+                // Fallback: any healthy agent
+                let fallback = agents.iter().find(|a| a.is_healthy());
+                match fallback {
+                    Some(agent) => Ok(agent.clone()),
+                    None => Err(ApiError::Internal(
+                        "No healthy agents available. Cannot route swarm query.".to_string()
+                    ).extend()),
+                }
+            }
+        }
+    }
+}
+
 /// Root Query type
 pub struct QueryRoot;
 
@@ -490,11 +543,10 @@ impl QueryRoot {
     async fn swarm_info(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Option<SwarmInfoView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -526,11 +578,10 @@ impl QueryRoot {
     async fn nodes(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Vec<NodeView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -639,11 +690,11 @@ impl QueryRoot {
         &self,
         ctx: &Context<'_>,
         id: String,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Option<ServiceView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -657,19 +708,19 @@ impl QueryRoot {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to inspect service: {}", e)).extend())?;
 
-        Ok(response.service.map(|s| convert_service_proto_to_view(s, &agent_id)))
+        Ok(response.service.map(|s| convert_service_proto_to_view(s, &resolved_agent_id)))
     }
 
     /// List tasks for a service
     async fn tasks(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         service_id: Option<String>,
     ) -> async_graphql::Result<Vec<TaskView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -700,7 +751,7 @@ impl QueryRoot {
                 updated_at: chrono::DateTime::from_timestamp(t.updated_at, 0)
                     .unwrap_or_else(chrono::Utc::now),
                 exit_code: t.exit_code,
-                agent_id: agent_id.clone(),
+                agent_id: resolved_agent_id.clone(),
             }
         }).collect();
 
@@ -756,11 +807,11 @@ impl QueryRoot {
         &self,
         ctx: &Context<'_>,
         namespace: String,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Option<StackView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -775,7 +826,7 @@ impl QueryRoot {
         let stack_services: Vec<ServiceView> = response.services
             .into_iter()
             .filter(|s| s.stack_namespace.as_deref() == Some(&namespace))
-            .map(|s| convert_service_proto_to_view(s, &agent_id))
+            .map(|s| convert_service_proto_to_view(s, &resolved_agent_id))
             .collect();
 
         if stack_services.is_empty() {
@@ -792,7 +843,7 @@ impl QueryRoot {
             replicas_desired,
             replicas_running,
             services: stack_services,
-            agent_id,
+            agent_id: resolved_agent_id,
         }))
     }
 
@@ -852,11 +903,11 @@ impl QueryRoot {
         &self,
         ctx: &Context<'_>,
         id: String,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Option<SwarmNetworkView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -868,7 +919,7 @@ impl QueryRoot {
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to inspect network: {}", e)).extend())?;
 
-        Ok(response.network.map(|n| convert_network_proto_to_view(n, &agent_id)))
+        Ok(response.network.map(|n| convert_network_proto_to_view(n, &resolved_agent_id)))
     }
 
     // =========================================================================
@@ -901,11 +952,11 @@ impl QueryRoot {
         &self,
         ctx: &Context<'_>,
         service_id: String,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<Vec<ComparisonSource>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -949,7 +1000,7 @@ impl QueryRoot {
                     container_id: t.container_id,
                     service_id: service_id.clone(),
                     task_id: t.id,
-                    agent_id: agent_id.clone(),
+                    agent_id: resolved_agent_id.clone(),
                     label,
                     slot,
                     node_id: t.node_id,
@@ -1117,12 +1168,12 @@ impl QueryRoot {
     async fn node(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         node_id: String,
     ) -> async_graphql::Result<Option<NodeView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -1157,7 +1208,7 @@ impl QueryRoot {
                 }),
                 nano_cpus: n.nano_cpus.to_string(),
                 memory_bytes: n.memory_bytes.to_string(),
-                agent_id: Some(agent_id.clone()),
+                agent_id: Some(resolved_agent_id.clone()),
             }
         });
 
@@ -1173,12 +1224,12 @@ impl QueryRoot {
     async fn service_coverage(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         service_id: String,
     ) -> async_graphql::Result<ServiceCoverageView> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -1200,7 +1251,7 @@ impl QueryRoot {
             coverage_percentage: coverage.coverage_percentage,
             service_id: coverage.service_id,
             is_global: coverage.is_global,
-            agent_id: agent_id.clone(),
+            agent_id: resolved_agent_id,
         })
     }
 
@@ -1213,12 +1264,12 @@ impl QueryRoot {
     async fn stack_health(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         namespace: String,
     ) -> async_graphql::Result<StackHealthView> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
+        let resolved_agent_id = agent.info.id.clone();
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -1261,7 +1312,7 @@ impl QueryRoot {
             total_desired: health.total_desired as i32,
             total_running: health.total_running as i32,
             total_failed: health.total_failed as i32,
-            agent_id: agent_id.clone(),
+            agent_id: resolved_agent_id,
         })
     }
 
@@ -1273,12 +1324,11 @@ impl QueryRoot {
     async fn task_inspect(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         task_id: String,
     ) -> async_graphql::Result<Option<TaskInspectView>> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
 
         let mut client = {
             let guard = agent.client.lock().await;
@@ -1364,12 +1414,11 @@ impl QueryRoot {
     async fn stack_file(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         stack_name: String,
     ) -> async_graphql::Result<StackFileResult> {
         let state = ctx.data::<AppState>()?;
-        let agent = state.agent_pool.get_agent(&agent_id)
-            .ok_or_else(|| ApiError::AgentNotFound(agent_id.clone()).extend())?;
+        let agent = resolve_swarm_agent(state, agent_id.as_deref()).await?;
 
         let mut client = {
             let guard = agent.client.lock().await;

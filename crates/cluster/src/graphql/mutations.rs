@@ -130,8 +130,8 @@ pub struct ServiceCreateInput {
     pub name: String,
     /// Container image (e.g., "nginx:latest")
     pub image: String,
-    /// Agent ID (must be a swarm manager)
-    pub agent_id: String,
+    /// Agent ID (must be a swarm manager). If omitted, auto-selects a manager.
+    pub agent_id: Option<String>,
     /// Number of replicas (default: 1, ignored if global=true)
     #[graphql(default = 1)]
     pub replicas: u64,
@@ -173,8 +173,8 @@ pub struct PortMappingInput {
 pub struct ServiceDeleteInput {
     /// Service ID or name
     pub service_id: String,
-    /// Agent ID (must be a swarm manager)
-    pub agent_id: String,
+    /// Agent ID (must be a swarm manager). If omitted, auto-selects a manager.
+    pub agent_id: Option<String>,
 }
 
 /// Input for updating a swarm service
@@ -182,8 +182,8 @@ pub struct ServiceDeleteInput {
 pub struct ServiceUpdateInput {
     /// Service ID or name
     pub service_id: String,
-    /// Agent ID (must be a swarm manager)
-    pub agent_id: String,
+    /// Agent ID (must be a swarm manager). If omitted, auto-selects a manager.
+    pub agent_id: Option<String>,
     /// New image (optional)
     pub image: Option<String>,
     /// New replica count (optional)
@@ -198,8 +198,8 @@ pub struct ServiceUpdateInput {
 pub struct StackDeployInput {
     /// Stack name (used as com.docker.stack.namespace label)
     pub stack_name: String,
-    /// Agent ID (must be a swarm manager)
-    pub agent_id: String,
+    /// Agent ID (must be a swarm manager). If omitted, auto-selects a manager.
+    pub agent_id: Option<String>,
     /// Services to create in the stack
     pub services: Vec<StackServiceInput>,
 }
@@ -370,6 +370,86 @@ async fn get_client(
     };
 
     Ok(client)
+}
+
+/// Helper to obtain a gRPC client for a swarm manager agent.
+///
+/// If `agent_id` is provided, validates that the agent is a manager and returns
+/// a clear error if it's a worker. If `agent_id` is not provided (None), auto-
+/// selects a healthy manager agent from the pool.
+async fn get_swarm_manager_client(
+    state: &AppState,
+    agent_id: Option<&str>,
+) -> async_graphql::Result<crate::agent::client::AgentGrpcClient> {
+    use crate::agent::pool::SwarmRole;
+
+    if let Some(id) = agent_id {
+        // User specified an agent — validate it's a manager
+        let agent = state
+            .agent_pool
+            .get_agent(id)
+            .ok_or_else(|| ApiError::AgentNotFound(id.to_string()).extend())?;
+
+        match agent.swarm_role() {
+            SwarmRole::Worker => {
+                return Err(ApiError::Internal(format!(
+                    "Agent '{}' is a swarm worker node and cannot handle swarm management queries. \
+                     Specify a manager agent or omit agent_id for auto-selection.",
+                    id
+                )).extend());
+            }
+            SwarmRole::None => {
+                return Err(ApiError::Internal(format!(
+                    "Agent '{}' is not part of any swarm. \
+                     Specify an agent that is a swarm manager.",
+                    id
+                )).extend());
+            }
+            SwarmRole::Manager => { /* ok */ }
+        }
+
+        let client = {
+            let guard = agent.client.lock().await;
+            guard.clone()
+        };
+        Ok(client)
+    } else {
+        // Auto-select: find a healthy manager agent
+        let agents = state.agent_pool.list_agents();
+        let manager = agents.iter().find(|a| {
+            a.is_healthy() && a.swarm_role() == SwarmRole::Manager
+        });
+
+        match manager {
+            Some(agent) => {
+                let client = {
+                    let guard = agent.client.lock().await;
+                    guard.clone()
+                };
+                Ok(client)
+            }
+            None => {
+                // Fallback: any healthy agent (covers single-node or pre-health-check scenarios)
+                let fallback = agents.iter().find(|a| a.is_healthy());
+                match fallback {
+                    Some(agent) => {
+                        tracing::warn!(
+                            "No healthy manager agent found, falling back to agent '{}'",
+                            agent.info.id
+                        );
+                        let client = {
+                            let guard = agent.client.lock().await;
+                            guard.clone()
+                        };
+                        Ok(client)
+                    }
+                    None => Err(ApiError::Internal(
+                        "No healthy agents available. Cannot route swarm request.".to_string()
+                    ).extend()),
+                }
+            }
+        }
+    }
 }
 
 /// Convert a list of LabelInput to a HashMap
@@ -784,7 +864,7 @@ impl MutationRoot {
         input: ServiceCreateInput,
     ) -> async_graphql::Result<ServiceCreateResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let ports: Vec<crate::agent::client::ServicePortConfig> = input.ports
             .unwrap_or_default()
@@ -853,7 +933,7 @@ impl MutationRoot {
         input: ServiceDeleteInput,
     ) -> async_graphql::Result<ServiceDeleteResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .delete_service(crate::agent::client::DeleteServiceRequest {
@@ -877,7 +957,7 @@ impl MutationRoot {
         input: ServiceUpdateInput,
     ) -> async_graphql::Result<ServiceUpdateResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .update_service(crate::agent::client::UpdateServiceRequest {
@@ -924,7 +1004,7 @@ impl MutationRoot {
         input: StackDeployInput,
     ) -> async_graphql::Result<StackDeployResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let mut service_ids = Vec::new();
         let mut failed_services = Vec::new();
@@ -1019,10 +1099,10 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
         stack_name: String,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<StackRemoveResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &agent_id).await?;
+        let mut client = get_swarm_manager_client(state, agent_id.as_deref()).await?;
 
         // List all services, then filter by stack namespace label
         let services = client
@@ -1072,7 +1152,7 @@ impl MutationRoot {
         input: super::types::swarm::NodeUpdateInput,
     ) -> async_graphql::Result<NodeUpdateResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let labels: std::collections::HashMap<String, String> = input.labels
             .unwrap_or_default()
@@ -1107,7 +1187,7 @@ impl MutationRoot {
         input: RemoveNodeInput,
     ) -> async_graphql::Result<RemoveNodeResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .remove_node(crate::agent::client::RemoveNodeRequest {
@@ -1134,7 +1214,7 @@ impl MutationRoot {
         input: RollbackServiceInput,
     ) -> async_graphql::Result<RollbackServiceResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .rollback_service(crate::agent::client::RollbackServiceRequest {
@@ -1160,7 +1240,7 @@ impl MutationRoot {
         input: CreateSecretInput,
     ) -> async_graphql::Result<CreateSecretResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let labels: std::collections::HashMap<String, String> = input.labels
             .unwrap_or_default()
@@ -1194,7 +1274,7 @@ impl MutationRoot {
         input: DeleteSecretInput,
     ) -> async_graphql::Result<DeleteSecretResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .delete_secret(crate::agent::client::DeleteSecretRequest {
@@ -1220,7 +1300,7 @@ impl MutationRoot {
         input: CreateConfigInput,
     ) -> async_graphql::Result<CreateConfigResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let labels: std::collections::HashMap<String, String> = input.labels
             .unwrap_or_default()
@@ -1253,7 +1333,7 @@ impl MutationRoot {
         input: DeleteConfigInput,
     ) -> async_graphql::Result<DeleteConfigResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .delete_config(crate::agent::client::DeleteConfigRequest {
@@ -1279,7 +1359,17 @@ impl MutationRoot {
         input: SwarmInitInput,
     ) -> async_graphql::Result<SwarmInitResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        // swarm_init targets a node that is NOT yet in a swarm, so don't require manager role
+        let mut client = match input.agent_id.as_deref() {
+            Some(id) => get_client(state, id).await?,
+            None => {
+                let agents = state.agent_pool.list_agents();
+                let healthy = agents.iter().find(|a| a.is_healthy())
+                    .ok_or_else(|| ApiError::Internal("No healthy agents available".to_string()).extend())?;
+                let c = { let g = healthy.client.lock().await; g.clone() };
+                c
+            }
+        };
 
         let response = client
             .swarm_init(crate::agent::client::SwarmInitRequest {
@@ -1306,7 +1396,17 @@ impl MutationRoot {
         input: SwarmJoinInput,
     ) -> async_graphql::Result<SwarmJoinResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        // swarm_join targets a node that is NOT yet in the swarm, so don't require manager role
+        let mut client = match input.agent_id.as_deref() {
+            Some(id) => get_client(state, id).await?,
+            None => {
+                let agents = state.agent_pool.list_agents();
+                let healthy = agents.iter().find(|a| a.is_healthy())
+                    .ok_or_else(|| ApiError::Internal("No healthy agents available".to_string()).extend())?;
+                let c = { let g = healthy.client.lock().await; g.clone() };
+                c
+            }
+        };
 
         let response = client
             .swarm_join(crate::agent::client::SwarmJoinRequest {
@@ -1333,7 +1433,17 @@ impl MutationRoot {
         input: SwarmLeaveInput,
     ) -> async_graphql::Result<SwarmLeaveResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        // swarm_leave can be called on any node in the swarm (manager or worker)
+        let mut client = match input.agent_id.as_deref() {
+            Some(id) => get_client(state, id).await?,
+            None => {
+                let agents = state.agent_pool.list_agents();
+                let healthy = agents.iter().find(|a| a.is_healthy())
+                    .ok_or_else(|| ApiError::Internal("No healthy agents available".to_string()).extend())?;
+                let c = { let g = healthy.client.lock().await; g.clone() };
+                c
+            }
+        };
 
         let response = client
             .swarm_leave(crate::agent::client::SwarmLeaveRequest {
@@ -1359,7 +1469,7 @@ impl MutationRoot {
         input: NetworkConnectInput,
     ) -> async_graphql::Result<NetworkConnectResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .network_connect(crate::agent::client::NetworkConnectRequest {
@@ -1384,7 +1494,7 @@ impl MutationRoot {
         input: NetworkDisconnectInput,
     ) -> async_graphql::Result<NetworkDisconnectResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &input.agent_id).await?;
+        let mut client = get_swarm_manager_client(state, input.agent_id.as_deref()).await?;
 
         let response = client
             .network_disconnect(crate::agent::client::NetworkDisconnectRequest {
@@ -1412,10 +1522,10 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
         input: super::types::swarm::SwarmUpdateInput,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<super::types::swarm::SwarmUpdateResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &agent_id).await?;
+        let mut client = get_swarm_manager_client(state, agent_id.as_deref()).await?;
 
         // Parse numeric strings, returning a clear error on invalid input
         // instead of silently discarding the value.
@@ -1460,10 +1570,10 @@ impl MutationRoot {
     async fn swarm_unlock_key(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
     ) -> async_graphql::Result<super::types::swarm::SwarmUnlockKeyResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &agent_id).await?;
+        let mut client = get_swarm_manager_client(state, agent_id.as_deref()).await?;
 
         let response = client
             .swarm_unlock_key(crate::agent::client::SwarmUnlockKeyRequest {})
@@ -1481,11 +1591,11 @@ impl MutationRoot {
     async fn swarm_unlock(
         &self,
         ctx: &Context<'_>,
-        agent_id: String,
+        agent_id: Option<String>,
         unlock_key: String,
     ) -> async_graphql::Result<super::types::swarm::SwarmUnlockResult> {
         let state = ctx.data::<AppState>()?;
-        let mut client = get_client(state, &agent_id).await?;
+        let mut client = get_swarm_manager_client(state, agent_id.as_deref()).await?;
 
         let response = client
             .swarm_unlock(crate::agent::client::SwarmUnlockRequest {
@@ -1512,37 +1622,8 @@ impl MutationRoot {
     ) -> async_graphql::Result<super::types::swarm::DeployComposeStackResult> {
         let state = ctx.data::<AppState>()?;
 
-        // Pick a healthy agent that is a swarm manager.
-        // Strategy: filter to healthy agents, then probe each for swarm
-        // manager status. Fall back to the first healthy agent if none
-        // report as manager (single-node swarm, or fresh cluster).
-        let agents = state.agent_pool.list_agents();
-        let healthy: Vec<_> = agents.iter().filter(|a| a.is_healthy()).collect();
-        if healthy.is_empty() {
-            return Err(ApiError::Internal("No healthy agents available for stack deployment".to_string()).extend());
-        }
-
-        // Try to find a manager agent
-        let mut chosen = healthy[0].clone();
-        for agent in &healthy {
-            let mut probe = {
-                let guard = agent.client.lock().await;
-                guard.clone()
-            };
-            if let Ok(resp) = probe.get_swarm_info(crate::agent::client::SwarmInfoRequest {}).await {
-                if let Some(swarm) = resp.swarm {
-                    if swarm.is_manager {
-                        chosen = (*agent).clone();
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mut client = {
-            let guard = chosen.client.lock().await;
-            guard.clone()
-        };
+        // Use the centralized manager auto-selection helper
+        let mut client = get_swarm_manager_client(state, None).await?;
 
         let response = client
             .deploy_compose_stack(crate::agent::client::DeployComposeStackRequest {
@@ -1574,7 +1655,7 @@ pub struct NodeUpdateResult {
 
 #[derive(InputObject)]
 pub struct RemoveNodeInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub node_id: String,
     pub force: Option<bool>,
 }
@@ -1587,7 +1668,7 @@ pub struct RemoveNodeResult {
 
 #[derive(InputObject)]
 pub struct RollbackServiceInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub service_id: String,
 }
 
@@ -1599,7 +1680,7 @@ pub struct RollbackServiceResult {
 
 #[derive(InputObject)]
 pub struct CreateSecretInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub name: String,
     pub data: String,
     pub labels: Option<Vec<LabelInput>>,
@@ -1614,7 +1695,7 @@ pub struct CreateSecretResult {
 
 #[derive(InputObject)]
 pub struct DeleteSecretInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub secret_id: String,
 }
 
@@ -1626,7 +1707,7 @@ pub struct DeleteSecretResult {
 
 #[derive(InputObject)]
 pub struct CreateConfigInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub name: String,
     pub data: String,
     pub labels: Option<Vec<LabelInput>>,
@@ -1641,7 +1722,7 @@ pub struct CreateConfigResult {
 
 #[derive(InputObject)]
 pub struct DeleteConfigInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub config_id: String,
 }
 
@@ -1653,7 +1734,7 @@ pub struct DeleteConfigResult {
 
 #[derive(InputObject)]
 pub struct SwarmInitInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub listen_addr: String,
     pub advertise_addr: Option<String>,
     pub force_new_cluster: Option<bool>,
@@ -1668,7 +1749,7 @@ pub struct SwarmInitResult {
 
 #[derive(InputObject)]
 pub struct SwarmJoinInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub listen_addr: String,
     pub advertise_addr: Option<String>,
     pub remote_addrs: Vec<String>,
@@ -1683,7 +1764,7 @@ pub struct SwarmJoinResult {
 
 #[derive(InputObject)]
 pub struct SwarmLeaveInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub force: Option<bool>,
 }
 
@@ -1695,7 +1776,7 @@ pub struct SwarmLeaveResult {
 
 #[derive(InputObject)]
 pub struct NetworkConnectInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub network_id: String,
     pub container_id: String,
 }
@@ -1708,7 +1789,7 @@ pub struct NetworkConnectResult {
 
 #[derive(InputObject)]
 pub struct NetworkDisconnectInput {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub network_id: String,
     pub container_id: String,
     pub force: Option<bool>,

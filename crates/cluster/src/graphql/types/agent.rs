@@ -1,5 +1,5 @@
 use async_graphql::{SimpleObject, Enum};
-use crate::agent::{HealthStatus as AgentHealthStatus, AgentSource};
+use crate::agent::{HealthStatus as AgentHealthStatus, AgentSource, SwarmRole};
 use std::sync::Arc;
 
 /// Agent status in GraphQL
@@ -43,6 +43,27 @@ impl From<AgentSource> for AgentSourceGql {
     }
 }
 
+/// Swarm role of the agent's Docker node
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum SwarmRoleGql {
+    /// This node is a swarm manager
+    Manager,
+    /// This node is a swarm worker
+    Worker,
+    /// This node is not part of any swarm
+    None,
+}
+
+impl From<SwarmRole> for SwarmRoleGql {
+    fn from(role: SwarmRole) -> Self {
+        match role {
+            SwarmRole::Manager => SwarmRoleGql::Manager,
+            SwarmRole::Worker => SwarmRoleGql::Worker,
+            SwarmRole::None => SwarmRoleGql::None,
+        }
+    }
+}
+
 /// Label (key-value pair)
 #[derive(Debug, Clone, SimpleObject)]
 pub struct Label {
@@ -58,6 +79,7 @@ pub fn agent_view_from_connection(conn: &Arc<crate::agent::AgentConnection>, las
         address: conn.info.address.clone(),
         status: conn.health_status().into(),
         source: conn.source.into(),
+        swarm_role: conn.swarm_role().into(),
         last_seen,
         labels: conn.info.labels.iter().map(|(k, v)| Label {
             key: k.clone(),
@@ -76,6 +98,8 @@ pub struct AgentView {
     pub status: AgentStatus,
     /// How this agent was added (static config, discovered, or registered)
     pub source: AgentSourceGql,
+    /// Swarm role of this agent's Docker node (Manager, Worker, or None)
+    pub swarm_role: SwarmRoleGql,
     pub last_seen: chrono::DateTime<chrono::Utc>,
     pub labels: Vec<Label>,
     pub version: Option<String>,

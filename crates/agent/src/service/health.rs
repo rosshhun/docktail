@@ -9,17 +9,20 @@ use super::proto::{
     HealthStatus,
 };
 use crate::parser::metrics::{ParsingMetrics, MetricsSnapshot};
+use crate::state::SharedState;
 
 /// Implementation of the HealthService gRPC service
 /// Provides health check and monitoring capabilities based on real-time metrics
 pub struct HealthServiceImpl {
     /// Reference to the global parsing metrics for health determination
     metrics: Arc<ParsingMetrics>,
+    /// Reference to agent state for swarm role detection
+    state: SharedState,
 }
 
 impl HealthServiceImpl {
-    pub fn new(metrics: Arc<ParsingMetrics>) -> Self {
-        Self { metrics }
+    pub fn new(metrics: Arc<ParsingMetrics>, state: SharedState) -> Self {
+        Self { metrics, state }
     }
 
     /// Static health evaluation logic to ensure consistency between check() and watch()
@@ -68,11 +71,18 @@ impl HealthService for HealthServiceImpl {
         let snapshot = self.metrics.snapshot();
         let (status, message) = Self::evaluate_health(&snapshot);
 
+        // Refresh and include swarm role in metadata
+        self.state.refresh_swarm_role().await;
+        let swarm_role = self.state.get_swarm_role().await;
+
+        let mut metadata = snapshot.to_metadata_map();
+        metadata.insert("swarm_role".to_string(), swarm_role.as_str().to_string());
+
         let response = HealthCheckResponse {
             status: status as i32,
             message,
             timestamp: chrono::Utc::now().timestamp(),
-            metadata: snapshot.to_metadata_map(),
+            metadata,
         };
 
         Ok(Response::new(response))
@@ -84,8 +94,9 @@ impl HealthService for HealthServiceImpl {
         &self,
         _request: Request<HealthCheckRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        // Clone the Arc to move into the async stream
+        // Clone the Arcs to move into the async stream
         let metrics = self.metrics.clone();
+        let state = self.state.clone();
 
         let stream = async_stream::stream! {
             loop {
@@ -94,11 +105,18 @@ impl HealthService for HealthServiceImpl {
                 
                 let (status, message) = HealthServiceImpl::evaluate_health(&snapshot);
 
+                // Refresh and include swarm role
+                state.refresh_swarm_role().await;
+                let swarm_role = state.get_swarm_role().await;
+
+                let mut metadata = snapshot.to_metadata_map();
+                metadata.insert("swarm_role".to_string(), swarm_role.as_str().to_string());
+
                 let response = HealthCheckResponse {
                     status: status as i32,
                     message,
                     timestamp: chrono::Utc::now().timestamp(),
-                    metadata: snapshot.to_metadata_map(),
+                    metadata,
                 };
                 
                 yield Ok(response);

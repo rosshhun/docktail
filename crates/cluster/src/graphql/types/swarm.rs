@@ -487,7 +487,8 @@ impl NodeEventTypeGql {
 #[derive(InputObject, Clone, Debug)]
 pub struct NodeUpdateInput {
     pub node_id: String,
-    pub agent_id: String,
+    /// Agent ID (must be a swarm manager). If omitted, auto-selects a manager.
+    pub agent_id: Option<String>,
     /// New availability: "active", "pause", or "drain"
     pub availability: Option<String>,
     /// New role: "worker" or "manager"

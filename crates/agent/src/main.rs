@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create service implementations
     let log_service = LogServiceImpl::new(Arc::clone(&state));
     let inventory_service = InventoryServiceImpl::new(Arc::clone(&state));
-    let health_service = HealthServiceImpl::new(Arc::clone(&state.metrics));
+    let health_service = HealthServiceImpl::new(Arc::clone(&state.metrics), Arc::clone(&state));
     let stats_service = StatsServiceImpl::new(Arc::clone(&state));
     let control_service = ControlServiceImpl::new(Arc::clone(&state));
     let swarm_service = SwarmServiceImpl::new(Arc::clone(&state));

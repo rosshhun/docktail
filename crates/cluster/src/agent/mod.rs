@@ -4,7 +4,7 @@ pub mod registry;
 pub mod discovery;
 
 pub use client::AgentGrpcClient;
-pub use pool::{AgentConnection, AgentPool, AgentSource, HealthStatus};
+pub use pool::{AgentConnection, AgentPool, AgentSource, HealthStatus, SwarmRole};
 pub use registry::AgentRegistry;
 
 use thiserror::Error;

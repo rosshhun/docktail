@@ -30,6 +30,28 @@ pub enum AgentSource {
     Registered,
 }
 
+/// The swarm role of an agent's Docker node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmRole {
+    /// This node is a swarm manager.
+    Manager,
+    /// This node is in a swarm but is a worker.
+    Worker,
+    /// This node is not part of any swarm.
+    None,
+}
+
+impl SwarmRole {
+    /// Parse from the string value sent in health-check metadata.
+    pub fn from_metadata(s: &str) -> Self {
+        match s {
+            "manager" => SwarmRole::Manager,
+            "worker" => SwarmRole::Worker,
+            _ => SwarmRole::None,
+        }
+    }
+}
+
 impl From<u8> for HealthStatus {
     fn from(value: u8) -> Self {
         match value {
@@ -49,6 +71,8 @@ pub struct AgentInfo {
     pub address: String,
     pub labels: HashMap<String, String>,
     pub version: Option<String>,
+    /// Swarm role reported by the agent in its health-check metadata.
+    pub swarm_role: SwarmRole,
 }
 
 impl AgentInfo {
@@ -59,6 +83,7 @@ impl AgentInfo {
             address: config.address.clone(),
             labels: config.labels.clone(),
             version: None, // Will be populated during health check
+            swarm_role: SwarmRole::None, // Will be populated during health check
         }
     }
 }
@@ -70,6 +95,8 @@ pub struct AgentConnection {
     pub source: AgentSource,
     health_status: Arc<AtomicU8>,
     last_seen: Arc<RwLock<Instant>>,
+    /// Swarm role reported by the agent. Atomic: 0=None, 1=Manager, 2=Worker.
+    swarm_role: Arc<AtomicU8>,
 }
 
 impl AgentConnection {
@@ -99,6 +126,25 @@ impl AgentConnection {
     #[allow(dead_code)]
     pub fn mark_degraded(&self) {
         self.health_status.store(HealthStatus::Degraded as u8, Ordering::Release);
+    }
+
+    /// Get the agent's swarm role.
+    pub fn swarm_role(&self) -> SwarmRole {
+        match self.swarm_role.load(Ordering::Acquire) {
+            1 => SwarmRole::Manager,
+            2 => SwarmRole::Worker,
+            _ => SwarmRole::None,
+        }
+    }
+
+    /// Update the agent's swarm role.
+    fn update_swarm_role(&self, role: SwarmRole) {
+        let val = match role {
+            SwarmRole::Manager => 1u8,
+            SwarmRole::Worker => 2u8,
+            SwarmRole::None => 0u8,
+        };
+        self.swarm_role.store(val, Ordering::Release);
     }
 
     /// Update health status from proto value
@@ -169,6 +215,11 @@ impl AgentConnection {
                 // Update status based on what the agent reported
                 self.update_health_status(response.status);
                 self.update_last_seen().await;
+
+                // Extract swarm role from health-check metadata
+                if let Some(role_str) = response.metadata.get("swarm_role") {
+                    self.update_swarm_role(SwarmRole::from_metadata(role_str));
+                }
                 
                 let status = self.health_status();
                 match status {
@@ -261,6 +312,7 @@ impl AgentPool {
             source,
             health_status: Arc::new(AtomicU8::new(HealthStatus::Unknown as u8)),
             last_seen: Arc::new(RwLock::new(Instant::now())),
+            swarm_role: Arc::new(AtomicU8::new(0)), // None until first health check
         });
 
         // Perform initial health check

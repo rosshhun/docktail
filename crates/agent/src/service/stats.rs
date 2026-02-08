@@ -21,6 +21,20 @@ impl StatsServiceImpl {
         Self { state }
     }
 
+    /// Classify a Docker/bollard error into an appropriate gRPC status.
+    /// Only 404 responses map to `not_found`; permission errors become
+    /// `permission_denied`; everything else is `internal`.
+    fn classify_docker_error(container_id: &str, e: crate::docker::client::DockerError) -> Status {
+        let msg = e.to_string();
+        if msg.contains("404") || msg.to_lowercase().contains("not found") || matches!(e, crate::docker::client::DockerError::ContainerNotFound(_)) {
+            Status::not_found(format!("Container not found: {}", container_id))
+        } else if msg.contains("403") || msg.to_lowercase().contains("permission") || matches!(e, crate::docker::client::DockerError::PermissionDenied) {
+            Status::permission_denied(format!("Permission denied for container {}: {}", container_id, msg))
+        } else {
+            Status::internal(format!("Failed to get stats for container {}: {}", container_id, msg))
+        }
+    }
+
     /// Get single stats snapshot
     async fn get_stats_once(&self, container_id: &str) -> Result<ContainerStatsResponse, Status> {
         let mut stats_stream = self.state.docker
@@ -28,7 +42,7 @@ impl StatsServiceImpl {
             .await
             .map_err(|e| {
                 error!("Failed to get stats for container {}: {}", container_id, e);
-                Status::not_found(format!("Container not found: {}", container_id))
+                Self::classify_docker_error(container_id, e)
             })?;
 
         // Get the first (and only) stats snapshot
@@ -329,7 +343,7 @@ impl StatsService for StatsServiceImpl {
             .await
             .map_err(|e| {
                 error!("Failed to start stats stream for {}: {}", container_id, e);
-                Status::not_found(format!("Container not found: {}", container_id))
+                Self::classify_docker_error(&container_id, e)
             })?;
 
         let container_id_clone = container_id.clone();
