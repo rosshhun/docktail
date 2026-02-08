@@ -498,3 +498,770 @@ pub(crate) fn convert_task_to_proto_with_name(t: &bollard::models::Task, service
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── Helpers ──────────────────────────────────────────────────
+
+    fn make_service(
+        id: &str,
+        name: &str,
+        image: &str,
+        replicas: Option<i64>,
+    ) -> bollard::models::Service {
+        bollard::models::Service {
+            id: Some(id.to_string()),
+            created_at: Some("2025-06-01T12:00:00Z".to_string()),
+            updated_at: Some("2025-06-02T12:00:00Z".to_string()),
+            spec: Some(bollard::models::ServiceSpec {
+                name: Some(name.to_string()),
+                mode: Some(bollard::models::ServiceSpecMode {
+                    replicated: Some(bollard::models::ServiceSpecModeReplicated {
+                        replicas,
+                    }),
+                    ..Default::default()
+                }),
+                task_template: Some(bollard::models::TaskSpec {
+                    container_spec: Some(bollard::models::TaskSpecContainerSpec {
+                        image: Some(image.to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                labels: Some({
+                    let mut m = HashMap::new();
+                    m.insert("com.docker.stack.namespace".to_string(), "mystack".to_string());
+                    m
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn make_running_task(task_id: &str, service_id: &str, node_id: &str) -> bollard::models::Task {
+        bollard::models::Task {
+            id: Some(task_id.to_string()),
+            service_id: Some(service_id.to_string()),
+            node_id: Some(node_id.to_string()),
+            slot: Some(1),
+            status: Some(bollard::models::TaskStatus {
+                state: Some(bollard::models::TaskState::RUNNING),
+                message: Some("running".to_string()),
+                ..Default::default()
+            }),
+            desired_state: Some(bollard::models::TaskState::RUNNING),
+            created_at: Some("2025-06-01T12:00:00Z".to_string()),
+            updated_at: Some("2025-06-02T12:00:00Z".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn make_node(
+        id: &str,
+        hostname: &str,
+        role: bollard::models::NodeSpecRoleEnum,
+        availability: bollard::models::NodeSpecAvailabilityEnum,
+        state: bollard::models::NodeState,
+    ) -> bollard::models::Node {
+        bollard::models::Node {
+            id: Some(id.to_string()),
+            spec: Some(bollard::models::NodeSpec {
+                role: Some(role),
+                availability: Some(availability),
+                labels: Some({
+                    let mut m = HashMap::new();
+                    m.insert("env".to_string(), "production".to_string());
+                    m
+                }),
+                ..Default::default()
+            }),
+            description: Some(bollard::models::NodeDescription {
+                hostname: Some(hostname.to_string()),
+                platform: Some(bollard::models::Platform {
+                    architecture: Some("x86_64".to_string()),
+                    os: Some("linux".to_string()),
+                }),
+                engine: Some(bollard::models::EngineDescription {
+                    engine_version: Some("24.0.7".to_string()),
+                    ..Default::default()
+                }),
+                resources: Some(bollard::models::ResourceObject {
+                    nano_cpus: Some(4_000_000_000),
+                    memory_bytes: Some(8_589_934_592),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            status: Some(bollard::models::NodeStatus {
+                state: Some(state),
+                addr: Some("192.168.1.10".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    // ── convert_service_to_proto ─────────────────────────────────
+
+    #[test]
+    fn service_basic_replicated() {
+        let svc = make_service("svc-1", "web", "nginx:latest", Some(3));
+        let tasks = vec![
+            make_running_task("t1", "svc-1", "node-a"),
+            make_running_task("t2", "svc-1", "node-b"),
+        ];
+
+        let info = convert_service_to_proto(&svc, &tasks);
+
+        assert_eq!(info.id, "svc-1");
+        assert_eq!(info.name, "web");
+        assert_eq!(info.image, "nginx:latest");
+        assert_eq!(info.mode, ServiceMode::Replicated as i32);
+        assert_eq!(info.replicas_desired, 3);
+        assert_eq!(info.replicas_running, 2);
+        assert_eq!(info.stack_namespace, Some("mystack".to_string()));
+    }
+
+    #[test]
+    fn service_global_mode() {
+        let mut svc = make_service("svc-g", "agent", "monitor:1.0", None);
+        if let Some(ref mut spec) = svc.spec {
+            spec.mode = Some(bollard::models::ServiceSpecMode {
+                global: Some(Default::default()),
+                ..Default::default()
+            });
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        assert_eq!(info.mode, ServiceMode::Global as i32);
+        assert_eq!(info.replicas_desired, 0);
+    }
+
+    #[test]
+    fn service_with_ports() {
+        let mut svc = make_service("svc-p", "web", "nginx", Some(1));
+        svc.endpoint = Some(bollard::models::ServiceEndpoint {
+            ports: Some(vec![
+                bollard::models::EndpointPortConfig {
+                    protocol: Some(bollard::models::EndpointPortConfigProtocolEnum::TCP),
+                    target_port: Some(80),
+                    published_port: Some(8080),
+                    publish_mode: Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS),
+                    ..Default::default()
+                },
+            ]),
+            virtual_ips: Some(vec![
+                bollard::models::ServiceEndpointVirtualIps {
+                    network_id: Some("net-1".to_string()),
+                    addr: Some("10.0.0.5/24".to_string()),
+                },
+            ]),
+            ..Default::default()
+        });
+
+        let info = convert_service_to_proto(&svc, &[]);
+        assert_eq!(info.ports.len(), 1);
+        assert_eq!(info.ports[0].target_port, 80);
+        assert_eq!(info.ports[0].published_port, 8080);
+        assert_eq!(info.ports[0].protocol, "tcp");
+        assert_eq!(info.virtual_ips.len(), 1);
+        assert_eq!(info.virtual_ips[0].network_id, "net-1");
+        assert_eq!(info.virtual_ips[0].addr, "10.0.0.5/24");
+    }
+
+    #[test]
+    fn service_with_update_status() {
+        let mut svc = make_service("svc-u", "api", "app:2", Some(2));
+        svc.update_status = Some(bollard::models::ServiceUpdateStatus {
+            state: Some(bollard::models::ServiceUpdateStatusStateEnum::UPDATING),
+            started_at: Some("2025-06-02T10:00:00Z".to_string()),
+            completed_at: None,
+            message: Some("updating 1/2".to_string()),
+        });
+
+        let info = convert_service_to_proto(&svc, &[]);
+        let us = info.update_status.unwrap();
+        assert_eq!(us.state, "updating");
+        assert!(us.started_at.is_some());
+        assert!(us.completed_at.is_none());
+        assert_eq!(us.message, "updating 1/2");
+    }
+
+    #[test]
+    fn service_with_placement_constraints() {
+        let mut svc = make_service("svc-pc", "db", "postgres", Some(1));
+        if let Some(ref mut spec) = svc.spec {
+            if let Some(ref mut tt) = spec.task_template {
+                tt.placement = Some(bollard::models::TaskSpecPlacement {
+                    constraints: Some(vec!["node.role == manager".to_string()]),
+                    preferences: Some(vec![
+                        bollard::models::TaskSpecPlacementPreferences {
+                            spread: Some(bollard::models::TaskSpecPlacementSpread {
+                                spread_descriptor: Some("node.labels.zone".to_string()),
+                            }),
+                        },
+                    ]),
+                    max_replicas: Some(2),
+                    platforms: Some(vec![
+                        bollard::models::Platform {
+                            architecture: Some("amd64".to_string()),
+                            os: Some("linux".to_string()),
+                        },
+                    ]),
+                    ..Default::default()
+                });
+            }
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        assert_eq!(info.placement_constraints, vec!["node.role == manager"]);
+        let placement = info.placement.unwrap();
+        assert_eq!(placement.constraints, vec!["node.role == manager"]);
+        assert_eq!(placement.preferences.len(), 1);
+        assert_eq!(placement.preferences[0].spread_descriptor, "node.labels.zone");
+        assert_eq!(placement.max_replicas_per_node, Some(2));
+        assert_eq!(placement.platforms.len(), 1);
+        assert_eq!(placement.platforms[0].os, "linux");
+    }
+
+    #[test]
+    fn service_with_update_and_rollback_config() {
+        let mut svc = make_service("svc-uc", "web", "nginx", Some(3));
+        if let Some(ref mut spec) = svc.spec {
+            spec.update_config = Some(bollard::models::ServiceSpecUpdateConfig {
+                parallelism: Some(2),
+                delay: Some(5_000_000_000),
+                failure_action: Some(bollard::models::ServiceSpecUpdateConfigFailureActionEnum::ROLLBACK),
+                monitor: Some(10_000_000_000),
+                max_failure_ratio: Some(0.1),
+                order: Some(bollard::models::ServiceSpecUpdateConfigOrderEnum::START_FIRST),
+            });
+            spec.rollback_config = Some(bollard::models::ServiceSpecRollbackConfig {
+                parallelism: Some(1),
+                delay: Some(1_000_000_000),
+                failure_action: Some(bollard::models::ServiceSpecRollbackConfigFailureActionEnum::PAUSE),
+                monitor: Some(5_000_000_000),
+                max_failure_ratio: Some(0.2),
+                order: Some(bollard::models::ServiceSpecRollbackConfigOrderEnum::STOP_FIRST),
+            });
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        let uc = info.update_config.unwrap();
+        assert_eq!(uc.parallelism, 2);
+        assert_eq!(uc.delay_ns, 5_000_000_000);
+        assert!(uc.failure_action.contains("rollback"));
+        assert!(uc.order.contains("start-first"));
+
+        let rc = info.rollback_config.unwrap();
+        assert_eq!(rc.parallelism, 1);
+        assert_eq!(rc.delay_ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn service_with_secret_and_config_refs() {
+        let mut svc = make_service("svc-sc", "app", "myapp:1", Some(1));
+        if let Some(ref mut spec) = svc.spec {
+            if let Some(ref mut tt) = spec.task_template {
+                if let Some(ref mut cs) = tt.container_spec {
+                    cs.secrets = Some(vec![
+                        bollard::models::TaskSpecContainerSpecSecrets {
+                            secret_id: Some("secret-abc".to_string()),
+                            secret_name: Some("db_password".to_string()),
+                            file: Some(bollard::models::TaskSpecContainerSpecFile {
+                                name: Some("db_pass".to_string()),
+                                uid: Some("0".to_string()),
+                                gid: Some("0".to_string()),
+                                mode: Some(0o400),
+                            }),
+                        },
+                    ]);
+                    cs.configs = Some(vec![
+                        bollard::models::TaskSpecContainerSpecConfigs {
+                            config_id: Some("config-xyz".to_string()),
+                            config_name: Some("app_config".to_string()),
+                            file: Some(bollard::models::TaskSpecContainerSpecFile1 {
+                                name: Some("config.json".to_string()),
+                                uid: Some("0".to_string()),
+                                gid: Some("0".to_string()),
+                                mode: Some(0o444),
+                            }),
+                            ..Default::default()
+                        },
+                    ]);
+                }
+            }
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        assert_eq!(info.secret_references.len(), 1);
+        assert_eq!(info.secret_references[0].secret_id, "secret-abc");
+        assert_eq!(info.secret_references[0].secret_name, "db_password");
+        assert_eq!(info.secret_references[0].file_name, "db_pass");
+        assert_eq!(info.secret_references[0].file_mode, 0o400);
+        assert_eq!(info.config_references.len(), 1);
+        assert_eq!(info.config_references[0].config_id, "config-xyz");
+        assert_eq!(info.config_references[0].config_name, "app_config");
+    }
+
+    #[test]
+    fn service_with_restart_policy() {
+        let mut svc = make_service("svc-rp", "worker", "app:1", Some(1));
+        if let Some(ref mut spec) = svc.spec {
+            if let Some(ref mut tt) = spec.task_template {
+                tt.restart_policy = Some(bollard::models::TaskSpecRestartPolicy {
+                    condition: Some(bollard::models::TaskSpecRestartPolicyConditionEnum::ON_FAILURE),
+                    delay: Some(5_000_000_000),
+                    max_attempts: Some(3),
+                    window: Some(60_000_000_000),
+                });
+            }
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        let rp = info.restart_policy.unwrap();
+        assert!(rp.condition.contains("failure"));
+        assert_eq!(rp.delay_ns, 5_000_000_000);
+        assert_eq!(rp.max_attempts, 3);
+        assert_eq!(rp.window_ns, 60_000_000_000);
+    }
+
+    #[test]
+    fn service_empty_defaults() {
+        let svc = bollard::models::Service::default();
+        let info = convert_service_to_proto(&svc, &[]);
+
+        assert_eq!(info.id, "");
+        assert_eq!(info.name, "");
+        assert_eq!(info.image, "");
+        assert_eq!(info.mode, ServiceMode::Unknown as i32);
+        assert_eq!(info.replicas_desired, 0);
+        assert_eq!(info.replicas_running, 0);
+        assert!(info.ports.is_empty());
+        assert!(info.virtual_ips.is_empty());
+        assert!(info.update_status.is_none());
+        assert!(info.placement.is_none());
+    }
+
+    #[test]
+    fn service_timestamps_parsed() {
+        let svc = make_service("svc-ts", "web", "nginx", Some(1));
+        let info = convert_service_to_proto(&svc, &[]);
+
+        // "2025-06-01T12:00:00Z" → 1748779200
+        assert_eq!(info.created_at, 1748779200);
+        // "2025-06-02T12:00:00Z" → 1748865600
+        assert_eq!(info.updated_at, 1748865600);
+    }
+
+    // ── convert_network_to_proto ─────────────────────────────────
+
+    #[test]
+    fn network_basic() {
+        let net = bollard::models::Network {
+            id: Some("net-1".to_string()),
+            name: Some("my-overlay".to_string()),
+            driver: Some("overlay".to_string()),
+            scope: Some("swarm".to_string()),
+            internal: Some(false),
+            attachable: Some(true),
+            ingress: Some(false),
+            enable_ipv6: Some(false),
+            created: Some("2025-06-01T12:00:00Z".to_string()),
+            labels: Some({
+                let mut m = HashMap::new();
+                m.insert("com.docker.stack.namespace".to_string(), "mystack".to_string());
+                m
+            }),
+            options: Some({
+                let mut m = HashMap::new();
+                m.insert("com.docker.network.driver.overlay.vxlanid_list".to_string(), "4097".to_string());
+                m
+            }),
+            ..Default::default()
+        };
+
+        let info = convert_network_to_proto(&net, &[]);
+        assert_eq!(info.id, "net-1");
+        assert_eq!(info.name, "my-overlay");
+        assert_eq!(info.driver, "overlay");
+        assert_eq!(info.scope, "swarm");
+        assert!(!info.is_internal);
+        assert!(info.is_attachable);
+        assert!(!info.is_ingress);
+        assert!(!info.enable_ipv6);
+        assert_eq!(info.created_at, 1748779200);
+        assert_eq!(info.labels.get("com.docker.stack.namespace").unwrap(), "mystack");
+    }
+
+    #[test]
+    fn network_with_ipam() {
+        let net = bollard::models::Network {
+            id: Some("net-2".to_string()),
+            name: Some("backend".to_string()),
+            ipam: Some(bollard::models::Ipam {
+                config: Some(vec![
+                    bollard::models::IpamConfig {
+                        subnet: Some("10.0.1.0/24".to_string()),
+                        gateway: Some("10.0.1.1".to_string()),
+                        ip_range: Some("10.0.1.0/25".to_string()),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let info = convert_network_to_proto(&net, &[]);
+        assert_eq!(info.ipam_configs.len(), 1);
+        assert_eq!(info.ipam_configs[0].subnet, Some("10.0.1.0/24".to_string()));
+        assert_eq!(info.ipam_configs[0].gateway, Some("10.0.1.1".to_string()));
+        assert_eq!(info.ipam_configs[0].ip_range, Some("10.0.1.0/25".to_string()));
+    }
+
+    #[test]
+    fn network_with_peers() {
+        let net = bollard::models::Network {
+            id: Some("net-3".to_string()),
+            name: Some("ingress".to_string()),
+            peers: Some(vec![
+                bollard::models::PeerInfo {
+                    name: Some("node-a".to_string()),
+                    ip: Some("192.168.1.10".to_string()),
+                },
+                bollard::models::PeerInfo {
+                    name: Some("node-b".to_string()),
+                    ip: Some("192.168.1.11".to_string()),
+                },
+            ]),
+            ..Default::default()
+        };
+
+        let info = convert_network_to_proto(&net, &[]);
+        assert_eq!(info.peers.len(), 2);
+        assert_eq!(info.peers[0].name, "node-a");
+        assert_eq!(info.peers[1].ip, "192.168.1.11");
+    }
+
+    #[test]
+    fn network_with_service_attachments() {
+        let net = bollard::models::Network {
+            id: Some("net-4".to_string()),
+            name: Some("frontend".to_string()),
+            ..Default::default()
+        };
+
+        let services = vec![
+            bollard::models::Service {
+                id: Some("svc-1".to_string()),
+                spec: Some(bollard::models::ServiceSpec {
+                    name: Some("web".to_string()),
+                    ..Default::default()
+                }),
+                endpoint: Some(bollard::models::ServiceEndpoint {
+                    virtual_ips: Some(vec![
+                        bollard::models::ServiceEndpointVirtualIps {
+                            network_id: Some("net-4".to_string()),
+                            addr: Some("10.0.0.5/24".to_string()),
+                        },
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            bollard::models::Service {
+                id: Some("svc-2".to_string()),
+                spec: Some(bollard::models::ServiceSpec {
+                    name: Some("api".to_string()),
+                    ..Default::default()
+                }),
+                endpoint: Some(bollard::models::ServiceEndpoint {
+                    virtual_ips: Some(vec![
+                        bollard::models::ServiceEndpointVirtualIps {
+                            network_id: Some("net-other".to_string()),
+                            addr: Some("10.0.1.5/24".to_string()),
+                        },
+                    ]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+
+        let info = convert_network_to_proto(&net, &services);
+        assert_eq!(info.service_attachments.len(), 1);
+        assert_eq!(info.service_attachments[0].service_id, "svc-1");
+        assert_eq!(info.service_attachments[0].service_name, "web");
+        assert_eq!(info.service_attachments[0].virtual_ip, "10.0.0.5/24");
+    }
+
+    #[test]
+    fn network_empty_defaults() {
+        let net = bollard::models::Network::default();
+        let info = convert_network_to_proto(&net, &[]);
+
+        assert_eq!(info.id, "");
+        assert_eq!(info.name, "");
+        assert_eq!(info.driver, "");
+        assert!(!info.is_internal);
+        assert!(info.ipam_configs.is_empty());
+        assert!(info.peers.is_empty());
+        assert!(info.service_attachments.is_empty());
+    }
+
+    // ── convert_node_to_proto ────────────────────────────────────
+
+    #[test]
+    fn node_manager_ready() {
+        let node = make_node(
+            "node-1", "manager-host",
+            bollard::models::NodeSpecRoleEnum::MANAGER,
+            bollard::models::NodeSpecAvailabilityEnum::ACTIVE,
+            bollard::models::NodeState::READY,
+        );
+
+        let info = convert_node_to_proto(&node);
+        assert_eq!(info.id, "node-1");
+        assert_eq!(info.hostname, "manager-host");
+        assert_eq!(info.role, NodeRole::Manager as i32);
+        assert_eq!(info.availability, NodeAvailability::Active as i32);
+        assert_eq!(info.status, NodeState::Ready as i32);
+        assert_eq!(info.addr, "192.168.1.10");
+        assert_eq!(info.engine_version, "24.0.7");
+        assert_eq!(info.os, "linux");
+        assert_eq!(info.architecture, "x86_64");
+        assert_eq!(info.nano_cpus, 4_000_000_000);
+        assert_eq!(info.memory_bytes, 8_589_934_592);
+        assert_eq!(info.labels.get("env").unwrap(), "production");
+    }
+
+    #[test]
+    fn node_worker_paused() {
+        let node = make_node(
+            "node-2", "worker-host",
+            bollard::models::NodeSpecRoleEnum::WORKER,
+            bollard::models::NodeSpecAvailabilityEnum::PAUSE,
+            bollard::models::NodeState::READY,
+        );
+
+        let info = convert_node_to_proto(&node);
+        assert_eq!(info.role, NodeRole::Worker as i32);
+        assert_eq!(info.availability, NodeAvailability::Pause as i32);
+    }
+
+    #[test]
+    fn node_drain_down() {
+        let node = make_node(
+            "node-3", "drain-host",
+            bollard::models::NodeSpecRoleEnum::WORKER,
+            bollard::models::NodeSpecAvailabilityEnum::DRAIN,
+            bollard::models::NodeState::DOWN,
+        );
+
+        let info = convert_node_to_proto(&node);
+        assert_eq!(info.availability, NodeAvailability::Drain as i32);
+        assert_eq!(info.status, NodeState::Down as i32);
+    }
+
+    #[test]
+    fn node_disconnected() {
+        let node = make_node(
+            "node-4", "disc-host",
+            bollard::models::NodeSpecRoleEnum::WORKER,
+            bollard::models::NodeSpecAvailabilityEnum::ACTIVE,
+            bollard::models::NodeState::DISCONNECTED,
+        );
+
+        let info = convert_node_to_proto(&node);
+        assert_eq!(info.status, NodeState::Disconnected as i32);
+    }
+
+    #[test]
+    fn node_with_manager_status() {
+        let mut node = make_node(
+            "node-m", "leader-host",
+            bollard::models::NodeSpecRoleEnum::MANAGER,
+            bollard::models::NodeSpecAvailabilityEnum::ACTIVE,
+            bollard::models::NodeState::READY,
+        );
+        node.manager_status = Some(bollard::models::ManagerStatus {
+            leader: Some(true),
+            reachability: Some(bollard::models::Reachability::REACHABLE),
+            addr: Some("192.168.1.10:2377".to_string()),
+        });
+
+        let info = convert_node_to_proto(&node);
+        let ms = info.manager_status.unwrap();
+        assert!(ms.leader);
+        assert_eq!(ms.addr, "192.168.1.10:2377");
+        assert!(ms.reachability.contains("reachable"));
+    }
+
+    #[test]
+    fn node_empty_defaults() {
+        let node = bollard::models::Node::default();
+        let info = convert_node_to_proto(&node);
+
+        assert_eq!(info.id, "");
+        assert_eq!(info.hostname, "");
+        assert_eq!(info.role, NodeRole::Unknown as i32);
+        assert_eq!(info.availability, NodeAvailability::Unknown as i32);
+        assert_eq!(info.status, NodeState::Unknown as i32);
+        assert_eq!(info.nano_cpus, 0);
+        assert_eq!(info.memory_bytes, 0);
+        assert!(info.manager_status.is_none());
+    }
+
+    // ── convert_task_to_proto ────────────────────────────────────
+
+    #[test]
+    fn task_running() {
+        let task = make_running_task("task-1", "svc-1", "node-a");
+        let info = convert_task_to_proto(&task);
+
+        assert_eq!(info.id, "task-1");
+        assert_eq!(info.service_id, "svc-1");
+        assert_eq!(info.node_id, "node-a");
+        assert_eq!(info.slot, Some(1));
+        assert_eq!(info.state, "running");
+        assert_eq!(info.desired_state, "running");
+        assert_eq!(info.status_message, "running");
+    }
+
+    #[test]
+    fn task_failed_with_error() {
+        let task = bollard::models::Task {
+            id: Some("task-f".to_string()),
+            service_id: Some("svc-1".to_string()),
+            node_id: Some("node-a".to_string()),
+            slot: Some(2),
+            status: Some(bollard::models::TaskStatus {
+                state: Some(bollard::models::TaskState::FAILED),
+                message: Some("task exited".to_string()),
+                err: Some("exit code 137".to_string()),
+                container_status: Some(bollard::models::ContainerStatus {
+                    container_id: Some("container-abc".to_string()),
+                    exit_code: Some(137),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            desired_state: Some(bollard::models::TaskState::SHUTDOWN),
+            created_at: Some("2025-06-01T12:00:00Z".to_string()),
+            updated_at: Some("2025-06-01T12:05:00Z".to_string()),
+            ..Default::default()
+        };
+
+        let info = convert_task_to_proto(&task);
+        assert_eq!(info.id, "task-f");
+        assert_eq!(info.state, "failed");
+        assert_eq!(info.desired_state, "shutdown");
+        assert_eq!(info.status_message, "task exited");
+        assert_eq!(info.status_err, Some("exit code 137".to_string()));
+        assert_eq!(info.container_id, Some("container-abc".to_string()));
+        assert_eq!(info.exit_code, Some(137));
+    }
+
+    #[test]
+    fn task_with_name_override() {
+        let task = make_running_task("task-n", "svc-1", "node-a");
+        let info = convert_task_to_proto_with_name(&task, "my-service");
+        assert_eq!(info.service_name, "my-service");
+    }
+
+    #[test]
+    fn task_name_from_labels_when_empty() {
+        let mut task = make_running_task("task-l", "svc-1", "node-a");
+        task.spec = Some(bollard::models::TaskSpec {
+            container_spec: Some(bollard::models::TaskSpecContainerSpec {
+                labels: Some({
+                    let mut m = HashMap::new();
+                    m.insert("com.docker.swarm.service.name".to_string(), "labeled-svc".to_string());
+                    m
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let info = convert_task_to_proto_with_name(&task, "");
+        assert_eq!(info.service_name, "labeled-svc");
+    }
+
+    #[test]
+    fn task_empty_defaults() {
+        let task = bollard::models::Task::default();
+        let info = convert_task_to_proto(&task);
+
+        assert_eq!(info.id, "");
+        assert_eq!(info.service_id, "");
+        assert_eq!(info.node_id, "");
+        assert_eq!(info.slot, None);
+        assert_eq!(info.state, "unknown");
+        assert_eq!(info.desired_state, "unknown");
+        assert_eq!(info.container_id, None);
+        assert_eq!(info.exit_code, None);
+    }
+
+    #[test]
+    fn task_timestamps_parsed() {
+        let task = make_running_task("task-ts", "svc-1", "node-a");
+        let info = convert_task_to_proto(&task);
+
+        assert_eq!(info.created_at, 1748779200);
+        assert_eq!(info.updated_at, 1748865600);
+    }
+
+    // ── Service running task counting ────────────────────────────
+
+    #[test]
+    fn service_counts_only_running_tasks_for_this_service() {
+        let svc = make_service("svc-A", "web", "nginx", Some(3));
+        let tasks = vec![
+            make_running_task("t1", "svc-A", "n1"),
+            make_running_task("t2", "svc-A", "n2"),
+            make_running_task("t3", "svc-B", "n3"), // different service
+            bollard::models::Task {
+                id: Some("t4".to_string()),
+                service_id: Some("svc-A".to_string()),
+                status: Some(bollard::models::TaskStatus {
+                    state: Some(bollard::models::TaskState::FAILED),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ];
+
+        let info = convert_service_to_proto(&svc, &tasks);
+        assert_eq!(info.replicas_running, 2); // only t1 and t2, not t3 (wrong svc) or t4 (failed)
+    }
+
+    // ── Service networks from task template ──────────────────────
+
+    #[test]
+    fn service_networks_from_task_template() {
+        let mut svc = make_service("svc-net", "web", "nginx", Some(1));
+        if let Some(ref mut spec) = svc.spec {
+            if let Some(ref mut tt) = spec.task_template {
+                tt.networks = Some(vec![
+                    bollard::models::NetworkAttachmentConfig {
+                        target: Some("net-1".to_string()),
+                        ..Default::default()
+                    },
+                    bollard::models::NetworkAttachmentConfig {
+                        target: Some("net-2".to_string()),
+                        ..Default::default()
+                    },
+                ]);
+            }
+        }
+
+        let info = convert_service_to_proto(&svc, &[]);
+        assert_eq!(info.networks, vec!["net-1", "net-2"]);
+    }
+}

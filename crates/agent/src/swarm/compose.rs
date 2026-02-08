@@ -526,3 +526,436 @@ fn parse_volumes(
     }
     mounts
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── into_response ───────────────────────────────────────────
+
+    #[test]
+    fn response_all_ok() {
+        let result = DeployResult {
+            service_ids: vec!["svc-1".into(), "svc-2".into()],
+            network_names: vec!["mystack_default".into()],
+            volume_names: vec!["mystack_data".into()],
+            failed: vec![],
+        };
+        let resp = into_response("mystack", result);
+        assert!(resp.success);
+        assert!(resp.message.contains("mystack"));
+        assert!(resp.message.contains("2 services"));
+        assert!(resp.message.contains("1 networks"));
+        assert!(resp.message.contains("1 volumes"));
+        assert_eq!(resp.service_ids, vec!["svc-1", "svc-2"]);
+        assert_eq!(resp.network_names, vec!["mystack_default"]);
+        assert_eq!(resp.volume_names, vec!["mystack_data"]);
+        assert!(resp.failed_services.is_empty());
+    }
+
+    #[test]
+    fn response_partial_failure() {
+        let result = DeployResult {
+            service_ids: vec!["svc-1".into()],
+            network_names: vec!["mystack_default".into()],
+            volume_names: vec![],
+            failed: vec!["svc-2: image not found".into()],
+        };
+        let resp = into_response("mystack", result);
+        assert!(!resp.success);
+        assert!(resp.message.contains("partially deployed"));
+        assert!(resp.message.contains("1 failed"));
+        assert_eq!(resp.failed_services.len(), 1);
+    }
+
+    #[test]
+    fn response_empty_deploy() {
+        let result = DeployResult {
+            service_ids: vec![],
+            network_names: vec![],
+            volume_names: vec![],
+            failed: vec![],
+        };
+        let resp = into_response("empty", result);
+        assert!(resp.success);
+        assert!(resp.message.contains("0 services"));
+    }
+
+    // ── parse_environment ───────────────────────────────────────
+
+    #[test]
+    fn env_list_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            environment:
+              - FOO=bar
+              - BAZ=qux
+        "#).unwrap();
+        let env = parse_environment(&yaml);
+        assert_eq!(env, vec!["FOO=bar", "BAZ=qux"]);
+    }
+
+    #[test]
+    fn env_map_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            environment:
+              DB_HOST: localhost
+              DB_PORT: 5432
+              DEBUG: true
+        "#).unwrap();
+        let env = parse_environment(&yaml);
+        assert!(env.contains(&"DB_HOST=localhost".to_string()));
+        assert!(env.contains(&"DB_PORT=5432".to_string()));
+        assert!(env.contains(&"DEBUG=true".to_string()));
+    }
+
+    #[test]
+    fn env_map_with_null_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            environment:
+              EMPTY_VAR:
+        "#).unwrap();
+        let env = parse_environment(&yaml);
+        assert_eq!(env, vec!["EMPTY_VAR="]);
+    }
+
+    #[test]
+    fn env_map_float_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            environment:
+              RATIO: 0.75
+        "#).unwrap();
+        let env = parse_environment(&yaml);
+        assert_eq!(env, vec!["RATIO=0.75"]);
+    }
+
+    #[test]
+    fn env_missing() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("image: nginx").unwrap();
+        let env = parse_environment(&yaml);
+        assert!(env.is_empty());
+    }
+
+    // ── parse_ports ─────────────────────────────────────────────
+
+    #[test]
+    fn ports_simple_string() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            ports:
+              - "8080:80"
+        "#).unwrap();
+        let ports = parse_ports(&yaml);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].target_port, Some(80));
+        assert_eq!(ports[0].published_port, Some(8080));
+        assert_eq!(ports[0].protocol, Some(bollard::models::EndpointPortConfigProtocolEnum::TCP));
+    }
+
+    #[test]
+    fn ports_with_protocol() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            ports:
+              - "53:53/udp"
+        "#).unwrap();
+        let ports = parse_ports(&yaml);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].target_port, Some(53));
+        assert_eq!(ports[0].protocol, Some(bollard::models::EndpointPortConfigProtocolEnum::UDP));
+    }
+
+    #[test]
+    fn ports_target_only() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            ports:
+              - "80"
+        "#).unwrap();
+        let ports = parse_ports(&yaml);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].target_port, Some(80));
+        assert_eq!(ports[0].published_port, None); // published=0 → None
+    }
+
+    #[test]
+    fn ports_host_published_target() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            ports:
+              - "0.0.0.0:8080:80"
+        "#).unwrap();
+        let ports = parse_ports(&yaml);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].published_port, Some(8080));
+        assert_eq!(ports[0].target_port, Some(80));
+    }
+
+    #[test]
+    fn ports_map_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            ports:
+              - target: 3000
+                published: 3000
+                protocol: tcp
+                mode: host
+        "#).unwrap();
+        let ports = parse_ports(&yaml);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].target_port, Some(3000));
+        assert_eq!(ports[0].published_port, Some(3000));
+        assert_eq!(ports[0].publish_mode, Some(bollard::models::EndpointPortConfigPublishModeEnum::HOST));
+    }
+
+    #[test]
+    fn ports_missing() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("image: nginx").unwrap();
+        let ports = parse_ports(&yaml);
+        assert!(ports.is_empty());
+    }
+
+    // ── parse_networks ──────────────────────────────────────────
+
+    #[test]
+    fn networks_list_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            networks:
+              - frontend
+              - backend
+        "#).unwrap();
+        let ext = HashMap::new();
+        let nets = parse_networks(&yaml, "mystack", &ext);
+        let targets: Vec<String> = nets.unwrap().iter()
+            .map(|n| n.target.clone().unwrap())
+            .collect();
+        assert_eq!(targets, vec!["mystack_frontend", "mystack_backend"]);
+    }
+
+    #[test]
+    fn networks_map_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            networks:
+              frontend: {}
+              backend: {}
+        "#).unwrap();
+        let ext = HashMap::new();
+        let nets = parse_networks(&yaml, "mystack", &ext);
+        let targets: Vec<String> = nets.unwrap().iter()
+            .map(|n| n.target.clone().unwrap())
+            .collect();
+        assert!(targets.contains(&"mystack_frontend".to_string()));
+        assert!(targets.contains(&"mystack_backend".to_string()));
+    }
+
+    #[test]
+    fn networks_with_external() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            networks:
+              - shared
+        "#).unwrap();
+        let mut ext = HashMap::new();
+        ext.insert("shared".to_string(), "external-net".to_string());
+        let nets = parse_networks(&yaml, "mystack", &ext);
+        let targets: Vec<String> = nets.unwrap().iter()
+            .map(|n| n.target.clone().unwrap())
+            .collect();
+        assert_eq!(targets, vec!["external-net"]);
+    }
+
+    #[test]
+    fn networks_missing_returns_default() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("image: nginx").unwrap();
+        let ext = HashMap::new();
+        let nets = parse_networks(&yaml, "mystack", &ext);
+        let targets: Vec<String> = nets.unwrap().iter()
+            .map(|n| n.target.clone().unwrap())
+            .collect();
+        assert_eq!(targets, vec!["mystack_default"]);
+    }
+
+    // ── parse_command ───────────────────────────────────────────
+
+    #[test]
+    fn command_string_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            command: "echo hello"
+        "#).unwrap();
+        let cmd = parse_command(&yaml);
+        assert_eq!(cmd, Some(vec!["/bin/sh".to_string(), "-c".to_string(), "echo hello".to_string()]));
+    }
+
+    #[test]
+    fn command_list_format() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            command:
+              - python
+              - app.py
+              - --port=8000
+        "#).unwrap();
+        let cmd = parse_command(&yaml);
+        assert_eq!(cmd, Some(vec!["python".to_string(), "app.py".to_string(), "--port=8000".to_string()]));
+    }
+
+    #[test]
+    fn command_missing() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("image: nginx").unwrap();
+        let cmd = parse_command(&yaml);
+        assert_eq!(cmd, None);
+    }
+
+    // ── parse_volumes (in service config) ───────────────────────
+
+    #[test]
+    fn volumes_string_named_volume() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - data:/var/lib/data
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source, Some("mystack_data".to_string()));
+        assert_eq!(mounts[0].target, Some("/var/lib/data".to_string()));
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::VOLUME));
+        assert_eq!(mounts[0].read_only, Some(false));
+    }
+
+    #[test]
+    fn volumes_string_bind_mount() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - /host/path:/container/path
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source, Some("/host/path".to_string()));
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::BIND));
+    }
+
+    #[test]
+    fn volumes_string_relative_bind() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - ./local:/app
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].source, Some("./local".to_string()));
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::BIND));
+    }
+
+    #[test]
+    fn volumes_string_read_only() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - data:/var/lib/data:ro
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts[0].read_only, Some(true));
+    }
+
+    #[test]
+    fn volumes_string_read_write() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - data:/var/lib/data:rw
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts[0].read_only, Some(false));
+    }
+
+    #[test]
+    fn volumes_string_external_volume() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - shared:/data
+        "#).unwrap();
+        let mut ext = HashMap::new();
+        ext.insert("shared".to_string(), "ext-shared-vol".to_string());
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts[0].source, Some("ext-shared-vol".to_string()));
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::VOLUME));
+    }
+
+    #[test]
+    fn volumes_string_target_only() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - /var/log
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target, Some("/var/log".to_string()));
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::VOLUME));
+    }
+
+    #[test]
+    fn volumes_map_format_bind() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - type: bind
+                source: /host/path
+                target: /container/path
+                read_only: true
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::BIND));
+        assert_eq!(mounts[0].source, Some("/host/path".to_string()));
+        assert_eq!(mounts[0].target, Some("/container/path".to_string()));
+        assert_eq!(mounts[0].read_only, Some(true));
+    }
+
+    #[test]
+    fn volumes_map_format_tmpfs() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - type: tmpfs
+                target: /tmp/cache
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].typ, Some(bollard::models::MountTypeEnum::TMPFS));
+        assert_eq!(mounts[0].target, Some("/tmp/cache".to_string()));
+        assert_eq!(mounts[0].source, None);
+    }
+
+    #[test]
+    fn volumes_map_format_volume_with_stack_prefix() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(r#"
+            volumes:
+              - type: volume
+                source: dbdata
+                target: /var/lib/postgresql/data
+        "#).unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert_eq!(mounts[0].source, Some("mystack_dbdata".to_string()));
+    }
+
+    #[test]
+    fn volumes_missing() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("image: nginx").unwrap();
+        let ext = HashMap::new();
+        let mounts = parse_volumes(&yaml, "mystack", &ext);
+        assert!(mounts.is_empty());
+    }
+
+    // ── DeployResult struct ─────────────────────────────────────
+
+    #[test]
+    fn deploy_result_into_response_preserves_all_fields() {
+        let result = DeployResult {
+            service_ids: vec!["a".into(), "b".into(), "c".into()],
+            network_names: vec!["net-1".into(), "net-2".into()],
+            volume_names: vec!["vol-1".into()],
+            failed: vec![],
+        };
+        let resp = into_response("stack", result);
+        assert_eq!(resp.service_ids.len(), 3);
+        assert_eq!(resp.network_names.len(), 2);
+        assert_eq!(resp.volume_names.len(), 1);
+    }
+}
