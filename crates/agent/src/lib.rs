@@ -10,7 +10,6 @@ pub mod parser;
 // Domain modules
 pub mod runtime;
 pub mod conf;
-pub mod client;
 pub mod swarm;
 pub mod logs;
 pub mod container;
