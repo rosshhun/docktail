@@ -9,7 +9,7 @@ use tokio_stream::StreamExt;
 use tonic::transport::Server;
 use tracing::{info, error, warn};
 
-use crate::config::AgentConfig;
+use crate::conf::AgentConfig;
 use crate::state::SharedState;
 use crate::runtime::tls::TlsStreamWrapper;
 use crate::runtime::stop::shutdown_signal;

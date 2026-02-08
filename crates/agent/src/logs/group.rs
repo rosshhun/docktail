@@ -8,7 +8,7 @@
 //! - Proactive timeout flushing via `check_timeout()` for idle streams
 //! - Safety limits to prevent unbounded memory growth
 
-use crate::config::MultilineConfig;
+use crate::conf::MultilineConfig;
 use crate::proto::NormalizedLogEntry;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

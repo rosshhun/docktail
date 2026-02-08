@@ -8,5 +8,5 @@ pub mod http_log;
 pub use json::{JsonDetector, JsonParser};
 pub use logfmt::{LogfmtDetector, LogfmtParser};
 pub use plain::{PlainTextDetector, PlainTextParser};
-pub use syslog::SyslogDetector;
-pub use http_log::HttpLogDetector;
+pub use syslog::{SyslogDetector, SyslogParser};
+pub use http_log::{HttpLogDetector, HttpLogParser};

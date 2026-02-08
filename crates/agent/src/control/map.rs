@@ -1,20 +1,5 @@
-//! Map — pure error mapping helpers for control service.
+//! Map — error mapping helpers for control service.
+//!
+//! Re-exports the shared Docker error mapper from [`crate::docker::error_map`].
 
-use tonic::Status;
-use crate::docker::client::DockerError;
-
-/// Map DockerError to tonic Status
-pub fn map_docker_error(err: DockerError) -> Status {
-    match &err {
-        DockerError::ContainerNotFound(id) => {
-            Status::not_found(format!("Container not found: {}", id))
-        }
-        DockerError::PermissionDenied => {
-            Status::permission_denied("Permission denied")
-        }
-        DockerError::ConnectionFailed(msg) => {
-            Status::unavailable(format!("Docker daemon unavailable: {}", msg))
-        }
-        _ => Status::internal(format!("Docker error: {}", err)),
-    }
-}
+pub use crate::docker::error_map::map_docker_error;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::{info, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::config::AgentConfig;
+use crate::conf::AgentConfig;
 use crate::docker::client::DockerClient;
 use crate::state::{AgentState, SharedState};
 use crate::job;

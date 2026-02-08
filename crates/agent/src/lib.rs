@@ -3,7 +3,6 @@
 // Core infrastructure
 pub mod docker;
 pub mod filter;
-pub mod config;
 pub mod state;
 pub mod parser;
 

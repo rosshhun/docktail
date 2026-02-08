@@ -1,5 +1,6 @@
 pub mod stream;
 pub mod client;
+pub mod error_map;
 pub mod inventory;
 pub mod container;
 pub mod image;

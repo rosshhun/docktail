@@ -15,6 +15,7 @@ pub enum LogLevel {
     Stderr = 1,
 }
 
+#[derive(Debug)]
 pub struct LogStreamRequest {
     pub container_id: String,
     pub since: Option<i64>,              // Unix timestamp (time-travel start)
@@ -25,6 +26,7 @@ pub struct LogStreamRequest {
     pub tail_lines: Option<u32>,         // Like "docker logs --tail 100"
 }
 
+#[derive(Debug)]
 pub struct LogStreamResponse {
     pub container_id: Arc<str>,          
     pub timestamp: i64,                  
@@ -108,5 +110,131 @@ impl Stream for LogStream {
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt;
+
+    fn make_log_line(content: &str, level: LogLevel) -> LogLine {
+        LogLine {
+            timestamp: 1000,
+            stream_type: level,
+            content: bytes::Bytes::from(content.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_no_filter() {
+        let lines = vec![
+            Ok(make_log_line("hello", LogLevel::Stdout)),
+            Ok(make_log_line("world", LogLevel::Stderr)),
+        ];
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test-container".to_string(), inner, None);
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.container_id.as_ref(), "test-container");
+        assert_eq!(first.content, bytes::Bytes::from("hello"));
+        assert_eq!(first.sequence, 0);
+        assert!(matches!(first.log_level, LogLevel::Stdout));
+
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.content, bytes::Bytes::from("world"));
+        assert_eq!(second.sequence, 1);
+        assert!(matches!(second.log_level, LogLevel::Stderr));
+
+        // Stream should end
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_with_include_filter() {
+        let filter = Arc::new(
+            crate::filter::engine::FilterEngine::new("error", false, FilterMode::Include).unwrap()
+        );
+
+        let lines = vec![
+            Ok(make_log_line("info: all good", LogLevel::Stdout)),
+            Ok(make_log_line("error: something failed", LogLevel::Stderr)),
+            Ok(make_log_line("debug: trace data", LogLevel::Stdout)),
+        ];
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test".to_string(), inner, Some(filter));
+
+        // Only the "error" line should come through
+        let result = stream.next().await.unwrap().unwrap();
+        assert_eq!(result.content, bytes::Bytes::from("error: something failed"));
+        assert_eq!(result.sequence, 0);
+
+        // Stream should end (other lines were filtered)
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_with_exclude_filter() {
+        let filter = Arc::new(
+            crate::filter::engine::FilterEngine::new("healthcheck", false, FilterMode::Exclude).unwrap()
+        );
+
+        let lines = vec![
+            Ok(make_log_line("GET /api/users 200", LogLevel::Stdout)),
+            Ok(make_log_line("healthcheck: ok", LogLevel::Stdout)),
+            Ok(make_log_line("POST /api/orders 201", LogLevel::Stdout)),
+        ];
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test".to_string(), inner, Some(filter));
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.content, bytes::Bytes::from("GET /api/users 200"));
+
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.content, bytes::Bytes::from("POST /api/orders 201"));
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_error_propagation() {
+        let lines: Vec<Result<LogLine, DockerError>> = vec![
+            Ok(make_log_line("first", LogLevel::Stdout)),
+            Err(DockerError::StreamClosed),
+        ];
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test".to_string(), inner, None);
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.content, bytes::Bytes::from("first"));
+
+        let err = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(err, DockerError::StreamClosed));
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_empty() {
+        let lines: Vec<Result<LogLine, DockerError>> = vec![];
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test".to_string(), inner, None);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_log_stream_sequence_monotonic() {
+        let lines: Vec<Result<LogLine, DockerError>> = (0..10)
+            .map(|i| Ok(make_log_line(&format!("line {}", i), LogLevel::Stdout)))
+            .collect();
+        let inner = tokio_stream::iter(lines);
+        let mut stream = LogStream::new("test".to_string(), inner, None);
+
+        let mut prev_seq = None;
+        while let Some(Ok(resp)) = stream.next().await {
+            if let Some(prev) = prev_seq {
+                assert_eq!(resp.sequence, prev + 1, "Sequence numbers should be monotonically increasing");
+            }
+            prev_seq = Some(resp.sequence);
+        }
+        assert_eq!(prev_seq, Some(9));
     }
 }

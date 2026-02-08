@@ -28,16 +28,9 @@ pub(crate) async fn list_all(docker: &DockerClient) -> Result<ServiceListRespons
 /// Inspect a single swarm service with task counts.
 pub(crate) async fn inspect_full(docker: &DockerClient, service_id: &str) -> Result<ServiceInspectResponse, Status> {
     let service = docker.inspect_service(service_id).await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("404") || msg.to_lowercase().contains("not found") {
-                Status::not_found(format!("Service not found: {}", service_id))
-            } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
-                Status::permission_denied(format!("Permission denied inspecting service: {}", e))
-            } else {
-                Status::internal(format!("Failed to inspect service: {}", e))
-            }
-        })?;
+        .map_err(|e| crate::docker::error_map::map_docker_error_with_context(
+            &format!("inspecting service {}", service_id), e,
+        ))?;
     let tasks = docker.list_tasks().await
         .map_err(|e| Status::internal(format!("Failed to list tasks: {}", e)))?;
     let info = convert_service_to_proto(&service, &tasks);
@@ -92,16 +85,9 @@ pub(crate) async fn delete(docker: &DockerClient, service_id: &str) -> Result<De
 pub(crate) async fn update_existing(docker: &DockerClient, req: UpdateServiceRequest) -> Result<UpdateServiceResponse, Status> {
     let service_id = &req.service_id;
     let current = docker.inspect_service(service_id).await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("404") || msg.to_lowercase().contains("not found") {
-                Status::not_found(format!("Service not found: {}", e))
-            } else if msg.contains("403") || msg.to_lowercase().contains("permission") {
-                Status::permission_denied(format!("Permission denied: {}", e))
-            } else {
-                Status::internal(format!("Failed to inspect service: {}", e))
-            }
-        })?;
+        .map_err(|e| crate::docker::error_map::map_docker_error_with_context(
+            &format!("updating service {}", service_id), e,
+        ))?;
 
     let version = current.version.as_ref()
         .and_then(|v| v.index)
@@ -160,34 +146,7 @@ pub(crate) fn build_create_spec(
         })
     };
 
-    let endpoint_spec = if !req.ports.is_empty() {
-        Some(bollard::models::EndpointSpec {
-            ports: Some(req.ports.iter().map(|p| {
-                bollard::models::EndpointPortConfig {
-                    protocol: if p.protocol.is_empty() {
-                        Some(bollard::models::EndpointPortConfigProtocolEnum::TCP)
-                    } else {
-                        match p.protocol.to_lowercase().as_str() {
-                            "udp" => Some(bollard::models::EndpointPortConfigProtocolEnum::UDP),
-                            "sctp" => Some(bollard::models::EndpointPortConfigProtocolEnum::SCTP),
-                            _ => Some(bollard::models::EndpointPortConfigProtocolEnum::TCP),
-                        }
-                    },
-                    target_port: Some(p.target_port as i64),
-                    published_port: if p.published_port > 0 { Some(p.published_port as i64) } else { None },
-                    publish_mode: if p.publish_mode == "host" {
-                        Some(bollard::models::EndpointPortConfigPublishModeEnum::HOST)
-                    } else {
-                        Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS)
-                    },
-                    ..Default::default()
-                }
-            }).collect()),
-            ..Default::default()
-        })
-    } else {
-        None
-    };
+    let endpoint_spec = convert_ports_to_endpoint_spec(&req.ports);
 
     let env: Vec<String> = req.env.iter()
         .map(|(k, v)| format!("{}={}", k, v))
@@ -204,23 +163,7 @@ pub(crate) fn build_create_spec(
         None
     };
 
-    let mounts = if !req.mounts.is_empty() {
-        Some(req.mounts.iter().map(|m| {
-            bollard::models::Mount {
-                target: Some(m.target.clone()),
-                source: Some(m.source.clone()),
-                typ: Some(match m.r#type.as_str() {
-                    "volume" => bollard::models::MountTypeEnum::VOLUME,
-                    "tmpfs" => bollard::models::MountTypeEnum::TMPFS,
-                    _ => bollard::models::MountTypeEnum::BIND,
-                }),
-                read_only: Some(m.read_only),
-                ..Default::default()
-            }
-        }).collect::<Vec<_>>())
-    } else {
-        None
-    };
+    let mounts = convert_mounts(&req.mounts);
 
     let resources = {
         let limits = req.resource_limits.as_ref().map(|rl| {
@@ -249,53 +192,9 @@ pub(crate) fn build_create_spec(
         }
     };
 
-    let restart_policy = req.restart_policy.as_ref().map(|rp| {
-        bollard::models::TaskSpecRestartPolicy {
-            condition: Some(match rp.condition.as_str() {
-                "none" => bollard::models::TaskSpecRestartPolicyConditionEnum::NONE,
-                "on-failure" => bollard::models::TaskSpecRestartPolicyConditionEnum::ON_FAILURE,
-                _ => bollard::models::TaskSpecRestartPolicyConditionEnum::ANY,
-            }),
-            delay: if rp.delay_ns > 0 { Some(rp.delay_ns) } else { None },
-            max_attempts: if rp.max_attempts > 0 { Some(rp.max_attempts as i64) } else { None },
-            window: if rp.window_ns > 0 { Some(rp.window_ns) } else { None },
-        }
-    });
-
-    let update_config = req.update_config.as_ref().map(|uc| {
-        bollard::models::ServiceSpecUpdateConfig {
-            parallelism: Some(uc.parallelism as i64),
-            delay: if uc.delay_ns > 0 { Some(uc.delay_ns) } else { None },
-            failure_action: Some(match uc.failure_action.as_str() {
-                "continue" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::CONTINUE,
-                "rollback" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::ROLLBACK,
-                _ => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::PAUSE,
-            }),
-            monitor: if uc.monitor_ns > 0 { Some(uc.monitor_ns) } else { None },
-            max_failure_ratio: Some(uc.max_failure_ratio),
-            order: Some(match uc.order.as_str() {
-                "start-first" => bollard::models::ServiceSpecUpdateConfigOrderEnum::START_FIRST,
-                _ => bollard::models::ServiceSpecUpdateConfigOrderEnum::STOP_FIRST,
-            }),
-        }
-    });
-
-    let rollback_config = req.rollback_config.as_ref().map(|rc| {
-        bollard::models::ServiceSpecRollbackConfig {
-            parallelism: Some(rc.parallelism as i64),
-            delay: if rc.delay_ns > 0 { Some(rc.delay_ns) } else { None },
-            failure_action: Some(match rc.failure_action.as_str() {
-                "continue" => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::CONTINUE,
-                _ => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::PAUSE,
-            }),
-            monitor: if rc.monitor_ns > 0 { Some(rc.monitor_ns) } else { None },
-            max_failure_ratio: Some(rc.max_failure_ratio),
-            order: Some(match rc.order.as_str() {
-                "start-first" => bollard::models::ServiceSpecRollbackConfigOrderEnum::START_FIRST,
-                _ => bollard::models::ServiceSpecRollbackConfigOrderEnum::STOP_FIRST,
-            }),
-        }
-    });
+    let restart_policy = req.restart_policy.as_ref().map(convert_restart_policy);
+    let update_config = req.update_config.as_ref().map(convert_update_config);
+    let rollback_config = req.rollback_config.as_ref().map(convert_rollback_config);
 
     let health_check = req.health_check.as_ref().map(|hc| {
         bollard::models::HealthConfig {
@@ -454,30 +353,7 @@ pub(crate) fn apply_update(
                 ..Default::default()
             })
         } else {
-            Some(bollard::models::EndpointSpec {
-                ports: Some(req.ports.iter().map(|p| {
-                    bollard::models::EndpointPortConfig {
-                        protocol: if p.protocol.is_empty() {
-                            Some(bollard::models::EndpointPortConfigProtocolEnum::TCP)
-                        } else {
-                            match p.protocol.to_lowercase().as_str() {
-                                "udp" => Some(bollard::models::EndpointPortConfigProtocolEnum::UDP),
-                                "sctp" => Some(bollard::models::EndpointPortConfigProtocolEnum::SCTP),
-                                _ => Some(bollard::models::EndpointPortConfigProtocolEnum::TCP),
-                            }
-                        },
-                        target_port: Some(p.target_port as i64),
-                        published_port: if p.published_port > 0 { Some(p.published_port as i64) } else { None },
-                        publish_mode: if p.publish_mode == "host" {
-                            Some(bollard::models::EndpointPortConfigPublishModeEnum::HOST)
-                        } else {
-                            Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS)
-                        },
-                        ..Default::default()
-                    }
-                }).collect()),
-                ..Default::default()
-            })
+            convert_ports_to_endpoint_spec(&req.ports)
         };
     }
 
@@ -510,19 +386,7 @@ pub(crate) fn apply_update(
                 cs.mounts = if req.mounts.is_empty() {
                     Some(Vec::new())
                 } else {
-                    Some(req.mounts.iter().map(|m| {
-                        bollard::models::Mount {
-                            target: Some(m.target.clone()),
-                            source: Some(m.source.clone()),
-                            typ: Some(match m.r#type.as_str() {
-                                "volume" => bollard::models::MountTypeEnum::VOLUME,
-                                "tmpfs" => bollard::models::MountTypeEnum::TMPFS,
-                                _ => bollard::models::MountTypeEnum::BIND,
-                            }),
-                            read_only: Some(m.read_only),
-                            ..Default::default()
-                        }
-                    }).collect())
+                    convert_mounts(&req.mounts)
                 };
             }
         }
@@ -531,54 +395,18 @@ pub(crate) fn apply_update(
     // Restart policy
     if let Some(ref rp) = req.restart_policy {
         if let Some(ref mut tt) = spec.task_template {
-            tt.restart_policy = Some(bollard::models::TaskSpecRestartPolicy {
-                condition: Some(match rp.condition.as_str() {
-                    "none" => bollard::models::TaskSpecRestartPolicyConditionEnum::NONE,
-                    "on-failure" => bollard::models::TaskSpecRestartPolicyConditionEnum::ON_FAILURE,
-                    _ => bollard::models::TaskSpecRestartPolicyConditionEnum::ANY,
-                }),
-                delay: if rp.delay_ns > 0 { Some(rp.delay_ns) } else { None },
-                max_attempts: if rp.max_attempts > 0 { Some(rp.max_attempts as i64) } else { None },
-                window: if rp.window_ns > 0 { Some(rp.window_ns) } else { None },
-            });
+            tt.restart_policy = Some(convert_restart_policy(rp));
         }
     }
 
     // Update config
     if let Some(ref uc) = req.update_config {
-        spec.update_config = Some(bollard::models::ServiceSpecUpdateConfig {
-            parallelism: Some(uc.parallelism as i64),
-            delay: if uc.delay_ns > 0 { Some(uc.delay_ns) } else { None },
-            failure_action: Some(match uc.failure_action.as_str() {
-                "continue" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::CONTINUE,
-                "rollback" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::ROLLBACK,
-                _ => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::PAUSE,
-            }),
-            monitor: if uc.monitor_ns > 0 { Some(uc.monitor_ns) } else { None },
-            max_failure_ratio: Some(uc.max_failure_ratio),
-            order: Some(match uc.order.as_str() {
-                "start-first" => bollard::models::ServiceSpecUpdateConfigOrderEnum::START_FIRST,
-                _ => bollard::models::ServiceSpecUpdateConfigOrderEnum::STOP_FIRST,
-            }),
-        });
+        spec.update_config = Some(convert_update_config(uc));
     }
 
     // Rollback config
     if let Some(ref rc) = req.rollback_config {
-        spec.rollback_config = Some(bollard::models::ServiceSpecRollbackConfig {
-            parallelism: Some(rc.parallelism as i64),
-            delay: if rc.delay_ns > 0 { Some(rc.delay_ns) } else { None },
-            failure_action: Some(match rc.failure_action.as_str() {
-                "continue" => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::CONTINUE,
-                _ => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::PAUSE,
-            }),
-            monitor: if rc.monitor_ns > 0 { Some(rc.monitor_ns) } else { None },
-            max_failure_ratio: Some(rc.max_failure_ratio),
-            order: Some(match rc.order.as_str() {
-                "start-first" => bollard::models::ServiceSpecRollbackConfigOrderEnum::START_FIRST,
-                _ => bollard::models::ServiceSpecRollbackConfigOrderEnum::STOP_FIRST,
-            }),
-        });
+        spec.rollback_config = Some(convert_rollback_config(rc));
     }
 
     // Constraints
@@ -608,4 +436,114 @@ pub(crate) fn apply_update(
     }
 
     spec
+}
+
+// ── Shared spec-building helpers ────────────────────────────────────────
+
+/// Convert a slice of proto [`ServicePortConfig`] into a bollard `EndpointSpec`.
+/// Returns `None` when the slice is empty.
+fn convert_ports_to_endpoint_spec(ports: &[crate::proto::ServicePortConfig]) -> Option<bollard::models::EndpointSpec> {
+    if ports.is_empty() {
+        return None;
+    }
+    Some(bollard::models::EndpointSpec {
+        ports: Some(ports.iter().map(convert_port_config).collect()),
+        ..Default::default()
+    })
+}
+
+/// Convert a single proto port config to a bollard `EndpointPortConfig`.
+fn convert_port_config(p: &crate::proto::ServicePortConfig) -> bollard::models::EndpointPortConfig {
+    bollard::models::EndpointPortConfig {
+        protocol: if p.protocol.is_empty() {
+            Some(bollard::models::EndpointPortConfigProtocolEnum::TCP)
+        } else {
+            match p.protocol.to_lowercase().as_str() {
+                "udp" => Some(bollard::models::EndpointPortConfigProtocolEnum::UDP),
+                "sctp" => Some(bollard::models::EndpointPortConfigProtocolEnum::SCTP),
+                _ => Some(bollard::models::EndpointPortConfigProtocolEnum::TCP),
+            }
+        },
+        target_port: Some(p.target_port as i64),
+        published_port: if p.published_port > 0 { Some(p.published_port as i64) } else { None },
+        publish_mode: if p.publish_mode == "host" {
+            Some(bollard::models::EndpointPortConfigPublishModeEnum::HOST)
+        } else {
+            Some(bollard::models::EndpointPortConfigPublishModeEnum::INGRESS)
+        },
+        ..Default::default()
+    }
+}
+
+/// Convert a slice of proto [`ServiceMount`] to bollard `Mount` objects.
+/// Returns `None` when the slice is empty.
+fn convert_mounts(mounts: &[crate::proto::ServiceMount]) -> Option<Vec<bollard::models::Mount>> {
+    if mounts.is_empty() {
+        return None;
+    }
+    Some(mounts.iter().map(|m| {
+        bollard::models::Mount {
+            target: Some(m.target.clone()),
+            source: Some(m.source.clone()),
+            typ: Some(match m.r#type.as_str() {
+                "volume" => bollard::models::MountTypeEnum::VOLUME,
+                "tmpfs" => bollard::models::MountTypeEnum::TMPFS,
+                _ => bollard::models::MountTypeEnum::BIND,
+            }),
+            read_only: Some(m.read_only),
+            ..Default::default()
+        }
+    }).collect())
+}
+
+/// Convert a proto [`ServiceRestartPolicy`] to a bollard `TaskSpecRestartPolicy`.
+fn convert_restart_policy(rp: &crate::proto::ServiceRestartPolicy) -> bollard::models::TaskSpecRestartPolicy {
+    bollard::models::TaskSpecRestartPolicy {
+        condition: Some(match rp.condition.as_str() {
+            "none" => bollard::models::TaskSpecRestartPolicyConditionEnum::NONE,
+            "on-failure" => bollard::models::TaskSpecRestartPolicyConditionEnum::ON_FAILURE,
+            _ => bollard::models::TaskSpecRestartPolicyConditionEnum::ANY,
+        }),
+        delay: if rp.delay_ns > 0 { Some(rp.delay_ns) } else { None },
+        max_attempts: if rp.max_attempts > 0 { Some(rp.max_attempts as i64) } else { None },
+        window: if rp.window_ns > 0 { Some(rp.window_ns) } else { None },
+    }
+}
+
+/// Convert a proto [`ServiceUpdateConfig`] to a bollard `ServiceSpecUpdateConfig`.
+fn convert_update_config(uc: &crate::proto::ServiceUpdateConfig) -> bollard::models::ServiceSpecUpdateConfig {
+    bollard::models::ServiceSpecUpdateConfig {
+        parallelism: Some(uc.parallelism as i64),
+        delay: if uc.delay_ns > 0 { Some(uc.delay_ns) } else { None },
+        failure_action: Some(match uc.failure_action.as_str() {
+            "continue" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::CONTINUE,
+            "rollback" => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::ROLLBACK,
+            _ => bollard::models::ServiceSpecUpdateConfigFailureActionEnum::PAUSE,
+        }),
+        monitor: if uc.monitor_ns > 0 { Some(uc.monitor_ns) } else { None },
+        max_failure_ratio: Some(uc.max_failure_ratio),
+        order: Some(match uc.order.as_str() {
+            "start-first" => bollard::models::ServiceSpecUpdateConfigOrderEnum::START_FIRST,
+            _ => bollard::models::ServiceSpecUpdateConfigOrderEnum::STOP_FIRST,
+        }),
+    }
+}
+
+/// Convert a proto [`ServiceUpdateConfig`] (used for rollback too) to a bollard
+/// `ServiceSpecRollbackConfig`.
+fn convert_rollback_config(rc: &crate::proto::ServiceUpdateConfig) -> bollard::models::ServiceSpecRollbackConfig {
+    bollard::models::ServiceSpecRollbackConfig {
+        parallelism: Some(rc.parallelism as i64),
+        delay: if rc.delay_ns > 0 { Some(rc.delay_ns) } else { None },
+        failure_action: Some(match rc.failure_action.as_str() {
+            "continue" => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::CONTINUE,
+            _ => bollard::models::ServiceSpecRollbackConfigFailureActionEnum::PAUSE,
+        }),
+        monitor: if rc.monitor_ns > 0 { Some(rc.monitor_ns) } else { None },
+        max_failure_ratio: Some(rc.max_failure_ratio),
+        order: Some(match rc.order.as_str() {
+            "start-first" => bollard::models::ServiceSpecRollbackConfigOrderEnum::START_FIRST,
+            _ => bollard::models::ServiceSpecRollbackConfigOrderEnum::STOP_FIRST,
+        }),
+    }
 }

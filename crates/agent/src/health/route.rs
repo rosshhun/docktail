@@ -129,3 +129,130 @@ impl HealthService for HealthServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_snapshot(
+        total_parsed: u64,
+        success_rate: f64,
+        parse_panics: u64,
+        docker_failures: u64,
+    ) -> MetricsSnapshot {
+        MetricsSnapshot {
+            detection_attempts: 0,
+            detection_success: 0,
+            detection_fallback: 0,
+            json_parsed: 0,
+            logfmt_parsed: 0,
+            syslog_parsed: 0,
+            http_parsed: 0,
+            plain_parsed: 0,
+            total_parsed,
+            avg_parse_time_us: 0.0,
+            parse_errors: 0,
+            parse_timeouts: 0,
+            parse_panics,
+            lines_too_large: 0,
+            non_utf8_content: 0,
+            success_rate,
+            active_containers: 0,
+            disabled_containers: 0,
+            docker_consecutive_failures: docker_failures,
+        }
+    }
+
+    #[test]
+    fn test_evaluate_health_healthy() {
+        let snap = make_snapshot(1000, 0.99, 0, 0);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Healthy));
+        assert!(msg.contains("normally"));
+    }
+
+    #[test]
+    fn test_evaluate_health_unhealthy_panics() {
+        let snap = make_snapshot(100, 0.95, 3, 0);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Unhealthy));
+        assert!(msg.contains("panic"));
+    }
+
+    #[test]
+    fn test_evaluate_health_unhealthy_docker_failures() {
+        let snap = make_snapshot(100, 0.95, 0, 5);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Unhealthy));
+        assert!(msg.contains("Docker"));
+    }
+
+    #[test]
+    fn test_evaluate_health_degraded_low_success_rate() {
+        let snap = make_snapshot(200, 0.60, 0, 0);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Degraded));
+        assert!(msg.contains("60.0%"));
+    }
+
+    #[test]
+    fn test_evaluate_health_low_volume_not_degraded() {
+        // Success rate is low but volume is too small to trigger
+        let snap = make_snapshot(50, 0.60, 0, 0);
+        let (status, _msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Healthy),
+            "Low volume (50 < 100) should not trigger degraded status");
+    }
+
+    #[test]
+    fn test_evaluate_health_fresh_agent_healthy() {
+        // No data yet — should be healthy
+        let snap = make_snapshot(0, 1.0, 0, 0);
+        let (status, _msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Healthy));
+    }
+
+    #[test]
+    fn test_evaluate_health_panic_takes_priority_over_docker() {
+        // Both panics and docker failures — panic should win
+        let snap = make_snapshot(100, 0.90, 1, 5);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Unhealthy));
+        assert!(msg.contains("panic"), "Panics should take priority: {}", msg);
+    }
+
+    #[test]
+    fn test_evaluate_health_docker_takes_priority_over_degraded() {
+        // Docker failures + low success rate — docker should win
+        let snap = make_snapshot(200, 0.60, 0, 3);
+        let (status, msg) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Unhealthy));
+        assert!(msg.contains("Docker"), "Docker failures should take priority: {}", msg);
+    }
+
+    #[test]
+    fn test_evaluate_health_boundary_docker_failures() {
+        // 2 failures (under threshold) — should still be healthy
+        let snap = make_snapshot(200, 0.95, 0, 2);
+        let (status, _) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Healthy));
+
+        // 3 failures (at threshold) — unhealthy
+        let snap = make_snapshot(200, 0.95, 0, 3);
+        let (status, _) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Unhealthy));
+    }
+
+    #[test]
+    fn test_evaluate_health_boundary_success_rate() {
+        // 80% (at threshold) — should still be healthy
+        let snap = make_snapshot(200, 0.80, 0, 0);
+        let (status, _) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Healthy));
+
+        // 79% (below threshold) — degraded
+        let snap = make_snapshot(200, 0.79, 0, 0);
+        let (status, _) = HealthServiceImpl::evaluate_health(&snap);
+        assert!(matches!(status, HealthStatus::Degraded));
+    }
+}

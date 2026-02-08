@@ -123,10 +123,7 @@ pub struct ParsedLog {
     
     /// Additional structured fields (key-value pairs)
     /// Serialized as a JSON object for efficient downstream processing
-    #[serde(
-        serialize_with = "serialize_fields_as_map",
-        deserialize_with = "deserialize_fields_from_map"
-    )]
+    #[serde(serialize_with = "serialize_fields_as_map")]
     pub fields: Vec<(String, String)>,
     
     /// Original raw content (always preserved)
@@ -211,5 +208,183 @@ impl ParseMetadata {
             parse_error: Some(error.to_string()),
             parse_time_nanos,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── LogFormat ────────────────────────────────────────────────
+
+    #[test]
+    fn test_log_format_as_str() {
+        assert_eq!(LogFormat::Json.as_str(), "json");
+        assert_eq!(LogFormat::Logfmt.as_str(), "logfmt");
+        assert_eq!(LogFormat::Syslog.as_str(), "syslog");
+        assert_eq!(LogFormat::HttpLog.as_str(), "http_log");
+        assert_eq!(LogFormat::PlainText.as_str(), "plain_text");
+        assert_eq!(LogFormat::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn test_log_format_serde_round_trip() {
+        let format = LogFormat::Json;
+        let json = serde_json::to_string(&format).unwrap();
+        let deserialized: LogFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(format, deserialized);
+    }
+
+    #[test]
+    fn test_log_format_serde_snake_case() {
+        let json = serde_json::to_string(&LogFormat::PlainText).unwrap();
+        assert_eq!(json, r#""plain_text""#);
+
+        let json = serde_json::to_string(&LogFormat::HttpLog).unwrap();
+        assert_eq!(json, r#""http_log""#);
+    }
+
+    #[test]
+    fn test_log_format_ordering() {
+        // LogFormat derives Ord, so verify ordering is consistent
+        assert!(LogFormat::Json < LogFormat::Logfmt);
+        assert!(LogFormat::PlainText < LogFormat::Unknown);
+    }
+
+    // ── DetectionResult ──────────────────────────────────────────
+
+    #[test]
+    fn test_detection_result_new_clamps_confidence() {
+        let result = DetectionResult::new(LogFormat::Json, 1.5);
+        assert_eq!(result.confidence, 1.0);
+
+        let result = DetectionResult::new(LogFormat::Json, -0.5);
+        assert_eq!(result.confidence, 0.0);
+
+        let result = DetectionResult::new(LogFormat::Json, 0.75);
+        assert_eq!(result.confidence, 0.75);
+    }
+
+    #[test]
+    fn test_detection_result_no_match() {
+        let result = DetectionResult::no_match();
+        assert!(matches!(result.format, LogFormat::Unknown));
+        assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_detection_result_low_confidence_clamps_to_half() {
+        let result = DetectionResult::low_confidence(0.8);
+        assert!(matches!(result.format, LogFormat::PlainText));
+        assert_eq!(result.confidence, 0.5); // clamped to [0.0, 0.5]
+    }
+
+    #[test]
+    fn test_detection_result_low_confidence_in_range() {
+        let result = DetectionResult::low_confidence(0.3);
+        assert_eq!(result.confidence, 0.3);
+    }
+
+    #[test]
+    fn test_detection_result_match_with_confidence() {
+        let result = DetectionResult::match_with_confidence(LogFormat::Logfmt, 0.85);
+        assert!(matches!(result.format, LogFormat::Logfmt));
+        assert_eq!(result.confidence, 0.85);
+    }
+
+    #[test]
+    fn test_detection_result_is_high_confidence() {
+        let high = DetectionResult::new(LogFormat::Json, 0.96);
+        assert!(high.is_high_confidence());
+
+        let low = DetectionResult::new(LogFormat::Json, 0.5);
+        assert!(!low.is_high_confidence());
+    }
+
+    #[test]
+    fn test_detection_result_is_medium_confidence() {
+        let medium = DetectionResult::new(LogFormat::Json, 0.75);
+        assert!(medium.is_medium_confidence());
+
+        let low = DetectionResult::new(LogFormat::Json, 0.5);
+        assert!(!low.is_medium_confidence());
+    }
+
+    // ── ParseError ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_error_display() {
+        let err = ParseError::InvalidFormat("bad data".to_string());
+        assert_eq!(err.to_string(), "Invalid format: bad data");
+
+        let err = ParseError::Timeout(Duration::from_millis(500));
+        assert!(err.to_string().contains("500ms"));
+
+        let err = ParseError::LineTooLarge(2000000, 1048576);
+        assert!(err.to_string().contains("2000000"));
+
+        let err = ParseError::NonUtf8;
+        assert_eq!(err.to_string(), "Non-UTF8 content");
+
+        let err = ParseError::ParserPanic("segfault".to_string());
+        assert!(err.to_string().contains("segfault"));
+
+        let err = ParseError::ParseFailed("reason".to_string());
+        assert!(err.to_string().contains("reason"));
+    }
+
+    // ── ParsedLog ────────────────────────────────────────────────
+
+    #[test]
+    fn test_parsed_log_plain_text() {
+        let raw = bytes::Bytes::from("hello world");
+        let log = ParsedLog::plain_text(raw.clone());
+        assert!(log.level.is_none());
+        assert!(log.message.is_none());
+        assert!(log.logger.is_none());
+        assert!(log.timestamp.is_none());
+        assert!(log.request.is_none());
+        assert!(log.error.is_none());
+        assert!(log.fields.is_empty());
+        assert_eq!(log.raw_content, raw);
+    }
+
+    #[test]
+    fn test_parsed_log_with_message() {
+        let raw = bytes::Bytes::from("INFO: started");
+        let log = ParsedLog::with_message(raw.clone(), "started".to_string());
+        assert_eq!(log.message, Some("started".to_string()));
+        assert_eq!(log.raw_content, raw);
+        assert!(log.level.is_none());
+    }
+
+    #[test]
+    fn test_parsed_log_serialization_skips_raw_content() {
+        let raw = bytes::Bytes::from("raw data");
+        let log = ParsedLog::plain_text(raw);
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(!json.contains("raw_content"), "raw_content should be skipped in serialization");
+        assert!(!json.contains("raw data"));
+    }
+
+    // ── ParseMetadata ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_metadata_success() {
+        let meta = ParseMetadata::success(LogFormat::Json, 1500);
+        assert!(meta.parse_success);
+        assert!(meta.parse_error.is_none());
+        assert_eq!(meta.parse_time_nanos, 1500);
+        assert!(matches!(meta.detected_format, LogFormat::Json));
+    }
+
+    #[test]
+    fn test_parse_metadata_failed() {
+        let err = ParseError::NonUtf8;
+        let meta = ParseMetadata::failed(LogFormat::Unknown, err, 200);
+        assert!(!meta.parse_success);
+        assert!(meta.parse_error.is_some());
+        assert!(meta.parse_error.unwrap().contains("Non-UTF8"));
+        assert_eq!(meta.parse_time_nanos, 200);
     }
 }

@@ -57,8 +57,8 @@ impl DockerClient {
                  Bollard v0.20 does not support i64 timestamps."
             );
         }
-        let since = since_raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-        let until = until_raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let since = since_raw.clamp(0, i32::MAX as i64) as i32;
+        let until = until_raw.clamp(0, i32::MAX as i64) as i32;
 
         let options = LogsOptions {
             follow: request.follow,

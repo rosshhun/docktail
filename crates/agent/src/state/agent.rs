@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::docker::client::DockerClient;
 use crate::docker::inventory::ContainerInfo;
-use crate::config::AgentConfig;
+use crate::conf::AgentConfig;
 use crate::parser::metrics::ParsingMetrics;
 use crate::parser::cache::ParserCache;
 use super::role::SwarmRole;

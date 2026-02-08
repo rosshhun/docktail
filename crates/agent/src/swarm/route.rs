@@ -436,11 +436,14 @@ impl SwarmService for SwarmServiceImpl {
         let req = request.into_inner();
         info!(stack_name = %req.stack_name, "Deploying compose stack");
         let result = crate::swarm::compose::deploy(&self.state.docker, &req.stack_name, &req.compose_yaml).await;
-        {
+        let all_ok = result.failed.is_empty();
+        let response = crate::swarm::compose::into_response(&req.stack_name, result);
+        // Only persist the stack file on successful deployment
+        if all_ok {
             let mut store = self.state.stack_files.lock().await;
             store.insert(req.stack_name.clone(), req.compose_yaml.clone());
         }
-        Ok(Response::new(crate::swarm::compose::into_response(&req.stack_name, result)))
+        Ok(Response::new(response))
     }
 
     async fn get_stack_file(

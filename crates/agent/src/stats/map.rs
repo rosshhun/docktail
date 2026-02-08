@@ -10,14 +10,10 @@ use crate::proto::{
 
 /// Classify a Docker/bollard error into an appropriate gRPC status.
 pub fn classify_docker_error(container_id: &str, e: crate::docker::client::DockerError) -> Status {
-    let msg = e.to_string();
-    if msg.contains("404") || msg.to_lowercase().contains("not found") || matches!(e, crate::docker::client::DockerError::ContainerNotFound(_)) {
-        Status::not_found(format!("Container not found: {}", container_id))
-    } else if msg.contains("403") || msg.to_lowercase().contains("permission") || matches!(e, crate::docker::client::DockerError::PermissionDenied) {
-        Status::permission_denied(format!("Permission denied for container {}: {}", container_id, msg))
-    } else {
-        Status::internal(format!("Failed to get stats for container {}: {}", container_id, msg))
-    }
+    crate::docker::error_map::map_docker_error_with_context(
+        &format!("stats for container {}", container_id),
+        e,
+    )
 }
 
 /// Convert bollard ContainerStatsResponse to protobuf ContainerStatsResponse

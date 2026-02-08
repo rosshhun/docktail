@@ -41,3 +41,101 @@ where
 
     deserializer.deserialize_map(MapVisitor)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: serialize fields via serde_json
+    fn serialize_fields(fields: &[(String, String)]) -> String {
+        use serde::Serialize;
+
+        #[derive(Serialize)]
+        struct Wrapper<'a> {
+            #[serde(serialize_with = "serialize_fields_as_map")]
+            fields: &'a [(String, String)],
+        }
+
+        let w = Wrapper { fields };
+        serde_json::to_string(&w).unwrap()
+    }
+
+    // Helper: deserialize fields via serde_json
+    fn deserialize_fields(json: &str) -> Vec<(String, String)> {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_fields_from_map")]
+            fields: Vec<(String, String)>,
+        }
+
+        let w: Wrapper = serde_json::from_str(json).unwrap();
+        w.fields
+    }
+
+    #[test]
+    fn test_serialize_empty_fields() {
+        let json = serialize_fields(&[]);
+        assert_eq!(json, r#"{"fields":{}}"#);
+    }
+
+    #[test]
+    fn test_serialize_single_field() {
+        let fields = vec![("key".to_string(), "value".to_string())];
+        let json = serialize_fields(&fields);
+        assert_eq!(json, r#"{"fields":{"key":"value"}}"#);
+    }
+
+    #[test]
+    fn test_serialize_multiple_fields() {
+        let fields = vec![
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ];
+        let json = serialize_fields(&fields);
+        assert!(json.contains(r#""a":"1""#));
+        assert!(json.contains(r#""b":"2""#));
+    }
+
+    #[test]
+    fn test_deserialize_empty_map() {
+        let fields = deserialize_fields(r#"{"fields":{}}"#);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_single_field() {
+        let fields = deserialize_fields(r#"{"fields":{"key":"value"}}"#);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0], ("key".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn test_round_trip() {
+        let original = vec![
+            ("host".to_string(), "server-01".to_string()),
+            ("level".to_string(), "info".to_string()),
+            ("pid".to_string(), "12345".to_string()),
+        ];
+        let json = serialize_fields(&original);
+        let deserialized = deserialize_fields(&json);
+        // Note: JSON object key order may differ, so check contents not order
+        for (k, v) in &original {
+            assert!(deserialized.contains(&(k.clone(), v.clone())),
+                "Missing key-value pair: {}={}", k, v);
+        }
+        assert_eq!(original.len(), deserialized.len());
+    }
+
+    #[test]
+    fn test_serialize_special_characters() {
+        let fields = vec![
+            ("path".to_string(), "/api/users?id=123&name=foo".to_string()),
+            ("msg".to_string(), "line with \"quotes\" and \\backslashes".to_string()),
+        ];
+        let json = serialize_fields(&fields);
+        // Should be valid JSON
+        let _: serde_json::Value = serde_json::from_str(&json).unwrap();
+    }
+}
