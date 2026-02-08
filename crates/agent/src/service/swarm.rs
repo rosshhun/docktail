@@ -416,6 +416,7 @@ impl SwarmService for SwarmServiceImpl {
 
         use std::sync::atomic::{AtomicU64, Ordering};
         let sequence = std::sync::Arc::new(AtomicU64::new(0));
+        let timestamps_enabled = req.timestamps;
 
         let output_stream = log_stream.map(move |result| {
             match result {
@@ -437,8 +438,12 @@ impl SwarmService for SwarmServiceImpl {
                         (None, raw_str)
                     };
 
-                    // Parse timestamp from the remainder (after prefix)
-                    let (timestamp, message_str) = {
+                    // Parse timestamp from the remainder (after prefix).
+                    // Only attempt when timestamps were requested — otherwise
+                    // Docker does not prepend timestamps and stripping the
+                    // first space-delimited token would corrupt log content
+                    // (especially for apps that emit ISO timestamps themselves).
+                    let (timestamp, message_str) = if timestamps_enabled {
                         let first_space = after_prefix.find(' ');
                         match first_space {
                             Some(idx) => {
@@ -458,6 +463,11 @@ impl SwarmService for SwarmServiceImpl {
                                 after_prefix,
                             ),
                         }
+                    } else {
+                        (
+                            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                            after_prefix,
+                        )
                     };
                     let content = bytes::Bytes::from(message_str.as_bytes().to_vec());
 
@@ -476,16 +486,19 @@ impl SwarmService for SwarmServiceImpl {
                                 ctx_node_id = trimmed[at_idx + 1..].to_string();
                                 let task_part = &trimmed[..at_idx];
                                 // task_part = "service_name.slot.task_id"
-                                // Split from the right: last segment = task_id,
-                                // second-to-last = slot, rest = service_name
-                                let segments: Vec<&str> = task_part.splitn(3, '.').collect();
+                                // Split from the RIGHT so that dotted service
+                                // names (e.g. "my.app.1.abc123") are handled
+                                // correctly: last segment = task_id,
+                                // second-to-last = slot, rest = service_name.
+                                let segments: Vec<&str> = task_part.rsplitn(3, '.').collect();
                                 if segments.len() >= 3 {
-                                    // segments = ["service_name", "slot", "task_id"]
+                                    // rsplitn yields [task_id, slot, service_name]
+                                    ctx_task_id = segments[0].to_string();
                                     ctx_slot = segments[1].parse::<u64>().unwrap_or(0);
-                                    ctx_task_id = segments[2].to_string();
+                                    // segments[2] = service_name (unused here)
                                 } else if segments.len() == 2 {
-                                    ctx_slot = segments[0].parse::<u64>().unwrap_or(0);
-                                    ctx_task_id = segments[1].to_string();
+                                    ctx_task_id = segments[0].to_string();
+                                    ctx_slot = segments[1].parse::<u64>().unwrap_or(0);
                                 }
                             }
                         }
@@ -1731,6 +1744,15 @@ impl SwarmService for SwarmServiceImpl {
 
                     prev_states.insert(node_id.clone(), (node_state, availability, role));
                 }
+
+                // Prune state for nodes that no longer appear in the API
+                // response, preventing unbounded memory growth on long-lived
+                // streams.
+                let current_node_ids: std::collections::HashSet<String> = nodes.iter()
+                    .filter_map(|n| n.id.clone())
+                    .collect();
+                prev_states.retain(|id, _| current_node_ids.contains(id));
+                draining_nodes.retain(|id, _| current_node_ids.contains(id));
             }
         };
 
@@ -1948,11 +1970,19 @@ impl SwarmService for SwarmServiceImpl {
                             }
                         }
                     } else {
-                        // New task that wasn't in previous state — check if it's running
-                        // (could be a recovery from a previous failure)
+                        // New task that wasn't in previous state — check if it's
+                        // a genuine recovery from a prior failure (not a normal
+                        // scale-up or rolling update).  We only emit
+                        // TASK_RECOVERED when:
+                        //   1. The task is running,
+                        //   2. We have prior state (not the very first poll), AND
+                        //   3. There was at least one failed/rejected task in
+                        //      the previous snapshot (evidence of a failure that
+                        //      this new task is recovering from).
                         if task_state == "running" && prev_replicas_running.is_some() {
-                            // Only emit recovery if running count went up
-                            if current_running > prev_replicas_running.unwrap_or(0) {
+                            let had_prior_failure = prev_task_states.values()
+                                .any(|(s, _)| matches!(s.as_str(), "failed" | "rejected"));
+                            if had_prior_failure && current_running > prev_replicas_running.unwrap_or(0) {
                                 yield ServiceEvent {
                                     service_id: service_id.clone(),
                                     event_type: ServiceEventType::ServiceEventTaskRecovered as i32,
@@ -2116,13 +2146,21 @@ impl SwarmService for SwarmServiceImpl {
                 if let Some(replicated) = &mode.replicated {
                     replicated.replicas.unwrap_or(1) as u64
                 } else if mode.global.is_some() {
-                    // For global services, count active nodes
+                    // For global services, count nodes that are both ACTIVE
+                    // and READY.  Nodes that are down, disconnected, or
+                    // draining will not receive a task so they should not
+                    // count towards the desired replica total.
                     self.state.docker.list_nodes().await
                         .map(|nodes| nodes.iter().filter(|n| {
-                            n.spec.as_ref()
+                            let is_active = n.spec.as_ref()
                                 .and_then(|s| s.availability.as_ref())
                                 .map(|a| matches!(a, bollard::models::NodeSpecAvailabilityEnum::ACTIVE))
-                                .unwrap_or(false)
+                                .unwrap_or(false);
+                            let is_ready = n.status.as_ref()
+                                .and_then(|s| s.state.as_ref())
+                                .map(|s| matches!(s, bollard::models::NodeState::READY))
+                                .unwrap_or(false);
+                            is_active && is_ready
                         }).count() as u64)
                         .unwrap_or(0)
                 } else {
@@ -2437,6 +2475,12 @@ impl SwarmService for SwarmServiceImpl {
 
                     slot_tasks.insert(key.clone(), (task_id, task_state, updated));
                 }
+
+                // Prune slots that no longer exist in current tasks to prevent
+                // stale entries from triggering false restart events after
+                // scale-down followed by scale-up (slot ID reuse).
+                slot_tasks.retain(|k, _| current_slot_tasks.contains_key(k));
+                restart_counts.retain(|k, _| current_slot_tasks.contains_key(k));
             }
         };
 
@@ -2714,6 +2758,7 @@ impl SwarmService for SwarmServiceImpl {
             };
 
         let task_id_clone = task_id.clone();
+        let timestamps_enabled = req.timestamps;
         let sequence_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let output_stream = raw_stream.map(move |result| {
             match result {
@@ -2726,7 +2771,10 @@ impl SwarmService for SwarmServiceImpl {
                     };
 
                     // Parse Docker timestamp from log line (RFC3339 prefix before first space)
-                    let (ts, content) = {
+                    // Only attempt when timestamps were requested — otherwise Docker
+                    // does not prepend timestamps, and stripping the first token
+                    // would corrupt application log content.
+                    let (ts, content) = if timestamps_enabled {
                         let split_idx = raw_bytes.iter().position(|&b| b == b' ');
                         match split_idx {
                             Some(idx) => {
@@ -2743,6 +2791,8 @@ impl SwarmService for SwarmServiceImpl {
                             }
                             None => (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), raw_bytes),
                         }
+                    } else {
+                        (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), raw_bytes)
                     };
 
                     let seq = sequence_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3116,7 +3166,8 @@ impl SwarmService for SwarmServiceImpl {
                         .or_else(|| config.get("name").and_then(|v| v.as_str()))
                         .unwrap_or(raw_name);
                     external_networks.insert(raw_name.to_string(), ext_name.to_string());
-                    created_network_names.push(ext_name.to_string());
+                    // Do NOT push into created_network_names — we did not create
+                    // this network; it is an external pre-existing resource.
                     info!(network = %ext_name, alias = %raw_name, "External network — not creating, using as-is");
                     continue;
                 }
@@ -3171,7 +3222,8 @@ impl SwarmService for SwarmServiceImpl {
                         .or_else(|| config.get("name").and_then(|v| v.as_str()))
                         .unwrap_or(raw_name);
                     external_volumes.insert(raw_name.to_string(), ext_name.to_string());
-                    created_volume_names.push(ext_name.to_string());
+                    // Do NOT push into created_volume_names — we did not create
+                    // this volume; it is an external pre-existing resource.
                     info!(volume = %ext_name, alias = %raw_name, "External volume — not creating, using as-is");
                     continue;
                 }
